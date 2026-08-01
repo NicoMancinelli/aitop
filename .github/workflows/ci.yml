@@ -15,8 +15,8 @@ jobs:
     name: ruff
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
       - run: uv sync --extra dev
@@ -34,8 +34,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
           python-version: ${{ matrix.python }}
@@ -61,14 +61,14 @@ jobs:
     name: build distributions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
       - run: uv build
       - name: Verify the wheel installs and runs standalone
         run: |
           uv tool install --force dist/*.whl
           "$(uv tool dir --bin)/aitop" --version
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: dist
           path: dist/
@@ -77,7 +77,7 @@ jobs:
     name: shellcheck install.sh
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Lint the installer
         run: shellcheck --severity=warning install.sh
 
@@ -92,7 +92,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install from this branch
         run: bash install.sh
         env:

@@ -4,7 +4,7 @@ Public surface: build a `SnapshotCollector`, await `collect()`, render the
 resulting `SystemSnapshot` however you like.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from aitop.bus import EventBus, Topic
 from aitop.collector import SnapshotCollector
