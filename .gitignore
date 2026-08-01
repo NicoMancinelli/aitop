@@ -1,4 +1,8 @@
-.venv/
+# No trailing slash: on macOS + iCloud, scripts/bootstrap.sh makes .venv a
+# *symlink* to a directory outside the synced tree, and `.venv/` would only
+# match a real directory.
+.venv
+.venv.nosync
 __pycache__/
 *.py[cod]
 dist/

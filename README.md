@@ -207,20 +207,37 @@ endpoints:
 ```bash
 git clone https://github.com/NicoMancinelli/aitop
 cd aitop
-uv sync --extra dev
+make bootstrap
+```
+
+That is the only setup step. Afterwards the ordinary commands work as you'd expect —
+no environment variables to remember:
+
+```bash
 uv run pytest
 uv run ruff check src tests
 uv run aitop
 ```
 
-> **macOS + iCloud Drive:** if you clone into `~/Library/Mobile Documents/…`, keep the
-> virtualenv out of iCloud. iCloud rewrites files under `.venv` and silently corrupts
-> the editable install, producing a `ModuleNotFoundError: No module named 'aitop'` that
-> no amount of debugging will explain:
->
-> ```bash
-> export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/aitop"
-> ```
+`make` on its own lists the shortcuts (`make test`, `make lint`, `make fmt`, `make run`,
+`make watch`, `make doctor`, `make build`, `make clean`).
+
+<details>
+<summary>Why bootstrap exists: the iCloud Drive trap</summary>
+
+If the checkout lives under `~/Library/Mobile Documents/…`, iCloud syncs and rewrites
+files inside `.venv` and silently corrupts the editable install. The failure is
+`ModuleNotFoundError: No module named 'aitop'` even though `_editable_impl_aitop.pth`
+is present, readable, and points at a directory that exists. Nothing in the traceback
+implicates iCloud, and re-running `uv sync` fixes it only until the next sync.
+
+`scripts/bootstrap.sh` detects this and puts the environment at `~/.venvs/<repo>`,
+leaving `.venv` as a symlink. The venv's thousands of files then never enter the synced
+tree at all, while `uv sync` and `uv run` keep working unchanged — `uv` follows and
+preserves the symlink. On Linux, or outside iCloud, the script is a plain
+`uv sync --extra dev`.
+
+</details>
 
 ### Releasing
 

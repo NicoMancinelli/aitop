@@ -74,12 +74,31 @@ jobs:
           path: dist/
 
   shellcheck:
-    name: shellcheck install.sh
+    name: shellcheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Lint the installer
-        run: shellcheck --severity=warning install.sh
+      - name: Lint the shell scripts
+        run: shellcheck --severity=warning install.sh scripts/*.sh
+
+  bootstrap:
+    name: bootstrap.sh (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Bootstrap a fresh checkout
+        run: ./scripts/bootstrap.sh
+        env:
+          AITOP_NO_UPDATE_CHECK: "1"
+      - name: Bare uv commands must work with no env vars afterwards
+        run: |
+          uv run python -c "import aitop; print(aitop.__version__)"
+          uv run aitop --version
 
   installer:
     name: install.sh (${{ matrix.os }})
