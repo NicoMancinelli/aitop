@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write        # required for PyPI Trusted Publishing
+
+jobs:
+  verify:
+    name: verify tag matches aitop.__version__
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: astral-sh/setup-uv@v5
+      - id: check
+        name: Refuse to ship a tag that disagrees with the package version
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="$(uv run --no-project --with . python -c 'import aitop; print(aitop.__version__)')"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG does not match aitop.__version__ ($VERSION)."
+            echo "::error::Bump __version__ in src/aitop/__init__.py, or retag as v$VERSION."
+            exit 1
+          fi
+          echo "✓ $TAG matches aitop $VERSION"
+
+  test:
+    name: test before publishing
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev
+      - run: uv run ruff check src tests
+      - run: uv run pytest -q
+        env:
+          AITOP_NO_UPDATE_CHECK: "1"
+
+  build:
+    name: build sdist + wheel
+    needs: [verify, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - name: Show what we built
+        run: ls -lh dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  release:
+    name: publish GitHub release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — uploading artifacts to it."
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "aitop ${TAG}" \
+              --generate-notes \
+              --notes-start-tag "$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo '')"
+          fi
+
+  pypi:
+    name: publish to PyPI
+    needs: [verify, build, release]
+    runs-on: ubuntu-latest
+    # Off until you register the project on PyPI and configure a Trusted
+    # Publisher, then set repository variable PUBLISH_TO_PYPI=true.
+    if: vars.PUBLISH_TO_PYPI == 'true'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/aitop
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

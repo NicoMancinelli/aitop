@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+
+  test:
+    name: test ${{ matrix.os }} py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS runners are Apple Silicon, so the AppleSiliconProbe path is
+        # genuinely exercised; ubuntu covers the psutil/Linux branches.
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - run: uv sync --extra dev
+      - name: Run tests
+        run: uv run pytest -q
+      - name: Smoke-test the CLI end to end
+        run: |
+          uv run aitop --json > snapshot.json
+          uv run python -c "
+          import json, sys
+          d = json.load(open('snapshot.json'))
+          assert d['hardware']['memory']['total_bytes'] > 0, 'no memory reported'
+          assert d['hardware']['cpu']['logical_cores'], 'no cores reported'
+          print('snapshot ok:', d['hardware']['host']['platform_id'])
+          "
+          uv run aitop --no-color --no-update-check
+          uv run aitop doctor --no-color
+        env:
+          AITOP_NO_UPDATE_CHECK: "1"
+
+  build:
+    name: build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - name: Verify the wheel installs and runs standalone
+        run: |
+          uv tool install --force dist/*.whl
+          "$(uv tool dir --bin)/aitop" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  shellcheck:
+    name: shellcheck install.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint the installer
+        run: shellcheck --severity=warning install.sh
+
+  installer:
+    name: install.sh (${{ matrix.os }})
+    # Only on branches that exist in this repo: install.sh resolves a git ref
+    # against origin, which a fork's PR head is not.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install from this branch
+        run: bash install.sh
+        env:
+          # Exercise the real script against this branch rather than a release.
+          AITOP_REF: ${{ github.head_ref || github.ref_name }}
+      - name: Confirm the installed CLI works
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          aitop --version
+          aitop doctor --no-color
+          aitop update --check --no-color
+        env:
+          AITOP_NO_UPDATE_CHECK: "1"
