@@ -36,6 +36,8 @@ class LMStudioEngine(BaseEngine):
             EngineCapability.LIST_LOADED,
             EngineCapability.UNLOAD,
             EngineCapability.LOAD,
+            EngineCapability.DELETE,
+            EngineCapability.PULL,
             EngineCapability.LIFECYCLE,
         }
     )
@@ -182,14 +184,24 @@ class LMStudioEngine(BaseEngine):
     async def start(self) -> tuple[bool, str]:
         if self.endpoint.remote:
             return False, "cannot start a remote engine"
-        result = await start_engine("lmstudio", host=self.host, port=self.port)
+        result = await start_engine(
+            "lmstudio",
+            host=self.host,
+            port=self.port,
+            container=self.endpoint.container,
+        )
         return result.ok, result.message
 
     async def stop(self) -> tuple[bool, str]:
         if self.endpoint.remote:
             return False, "cannot stop a remote engine"
         snap = await self.poll()
-        result = await stop_engine("lmstudio", pid=snap.pid, managed_by=snap.managed_by)
+        result = await stop_engine(
+            "lmstudio",
+            pid=snap.pid,
+            managed_by=snap.managed_by,
+            container=self.endpoint.container,
+        )
         return result.ok, result.message
 
     async def restart(self) -> tuple[bool, str]:
@@ -202,8 +214,53 @@ class LMStudioEngine(BaseEngine):
             managed_by=snap.managed_by,
             host=self.host,
             port=self.port,
+            container=self.endpoint.container,
         )
         return result.ok, result.message
+
+    async def delete(self, model_id: str) -> tuple[bool, str]:
+        """`lms remove -y` deletes a downloaded model (newer CLI)."""
+        if self.endpoint.remote:
+            return False, "delete requires a local `lms` CLI"
+        if which("lms") is None:
+            return False, "`lms` CLI not found on PATH"
+        result = await run("lms", "remove", "-y", model_id, timeout=60.0)
+        if not result.ok:
+            # Alias / older builds.
+            result = await run("lms", "rm", "-y", model_id, timeout=60.0)
+        if result.ok:
+            return True, f"deleted {model_id}"
+        return False, result.reason
+
+    async def pull(self, model: str, *, on_progress=None) -> tuple[bool, str]:
+        """`lms get` downloads a model. Progress is not streamed."""
+        if self.endpoint.remote:
+            return False, "pull requires a local `lms` CLI"
+        if which("lms") is None:
+            return False, "`lms` CLI not found on PATH"
+        if on_progress is not None:
+            from aitop.models import DownloadProgress, EngineKind
+
+            on_progress(
+                DownloadProgress(
+                    model=model, engine=EngineKind.LMSTUDIO, status=f"lms get {model}"
+                )
+            )
+        result = await run("lms", "get", model, timeout=None)
+        if result.ok:
+            if on_progress is not None:
+                from aitop.models import DownloadProgress, EngineKind
+
+                on_progress(
+                    DownloadProgress(
+                        model=model,
+                        engine=EngineKind.LMSTUDIO,
+                        status="done",
+                        done=True,
+                    )
+                )
+            return True, f"pulled {model}"
+        return False, result.reason
 
 
 def _data_array(payload: Any) -> list[dict[str, Any]]:

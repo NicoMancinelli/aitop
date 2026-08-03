@@ -37,6 +37,7 @@ def test_dashboard_html_is_self_contained():
     assert "/api/snapshot" in html
     assert "/api/stream" in html
     assert "EventSource" in html
+    assert "data-mact" in html
     assert "cdn." not in html.lower()
 
 

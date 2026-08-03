@@ -175,14 +175,24 @@ class OllamaEngine(BaseEngine):
     async def start(self) -> tuple[bool, str]:
         if self.endpoint.remote:
             return False, "cannot start a remote engine"
-        result = await start_engine("ollama", host=self.host, port=self.port)
+        result = await start_engine(
+            "ollama",
+            host=self.host,
+            port=self.port,
+            container=self.endpoint.container,
+        )
         return result.ok, result.message
 
     async def stop(self) -> tuple[bool, str]:
         if self.endpoint.remote:
             return False, "cannot stop a remote engine"
         snap = await self.poll()
-        result = await stop_engine("ollama", pid=snap.pid, managed_by=snap.managed_by)
+        result = await stop_engine(
+            "ollama",
+            pid=snap.pid,
+            managed_by=snap.managed_by,
+            container=self.endpoint.container,
+        )
         return result.ok, result.message
 
     async def restart(self) -> tuple[bool, str]:
@@ -195,6 +205,7 @@ class OllamaEngine(BaseEngine):
             managed_by=snap.managed_by,
             host=self.host,
             port=self.port,
+            container=self.endpoint.container,
         )
         return result.ok, result.message
 
@@ -206,7 +217,12 @@ class OllamaEngine(BaseEngine):
 
         new_host, new_port = split_host_port(host, self.port)
         snap = await self.poll()
-        stopped = await stop_engine("ollama", pid=snap.pid, managed_by=snap.managed_by)
+        stopped = await stop_engine(
+            "ollama",
+            pid=snap.pid,
+            managed_by=snap.managed_by,
+            container=self.endpoint.container,
+        )
         if not stopped.ok and "already gone" not in stopped.message:
             return False, f"rebind stop failed: {stopped.message}"
 
@@ -218,6 +234,7 @@ class OllamaEngine(BaseEngine):
             managed_by=snap.managed_by if snap.managed_by != "systemd" else "manual",
             host=new_host,
             port=new_port,
+            container=self.endpoint.container,
         )
         if not started.ok:
             return False, (

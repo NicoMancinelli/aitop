@@ -34,7 +34,13 @@ from aitop.utils.fmt import (
     sparkline,
     watts,
 )
-from aitop.views.tui_screens import ConfirmScreen, FilterScreen, HelpScreen, ModelPickerScreen
+from aitop.views.tui_screens import (
+    ConfirmScreen,
+    FilterScreen,
+    HelpScreen,
+    ModelPickerScreen,
+    PullScreen,
+)
 
 _HISTORY = 56
 _EMPTY = "__empty__"
@@ -230,6 +236,7 @@ class AiTopApp(App[None]):
         Binding("a", "toggle_offline", "All"),
         Binding("slash", "filter_catalog", "Filter"),
         Binding("o", "cycle_sort", "Sort"),
+        Binding("p", "pull_model", "Pull"),
         Binding("u", "unload", "Unload"),
         Binding("l", "load", "Load"),
         Binding("d", "delete_model", "Delete"),
@@ -846,6 +853,9 @@ class AiTopApp(App[None]):
     def action_load(self) -> None:
         self.run_worker(self._load_with_picker(), exclusive=True)
 
+    def action_pull_model(self) -> None:
+        self.run_worker(self._pull_model(), exclusive=True)
+
     def action_delete_model(self) -> None:
         self.run_worker(self._delete_selected(), exclusive=True)
 
@@ -946,6 +956,36 @@ class AiTopApp(App[None]):
         self._log_result(ok, message, source=engine.name)
         await self._force_refresh()
         self.query_one("#engines", DataTable).focus()
+
+    async def _pull_model(self) -> None:
+        engine = self._selected_engine()
+        if engine is None:
+            self.query_one("#log", RichLog).write("[yellow]select an engine first[/]")
+            return
+        if not engine.supports("pull"):
+            self.query_one("#log", RichLog).write(f"[yellow]{engine.name} cannot pull[/]")
+            return
+        model = await self.push_screen_wait(PullScreen(engine.name))
+        if not model:
+            return
+        log = self.query_one("#log", RichLog)
+        log.write(f"[cyan]pulling {model} into {engine.name}…[/]")
+
+        def on_progress(tick) -> None:
+            status = tick.status or model
+            if tick.total_bytes and tick.completed_bytes is not None:
+                frac = tick.completed_bytes / tick.total_bytes
+                log.write(
+                    f"[dim]{status}  {bytes_human(tick.completed_bytes)} / "
+                    f"{bytes_human(tick.total_bytes)} ({frac:.0%})[/]"
+                )
+            else:
+                log.write(f"[dim]{status}[/]")
+
+        ok, message = await engine.pull(model, on_progress=on_progress)
+        self._log_result(ok, message, source=engine.name)
+        await self._force_refresh()
+        self.query_one("#catalog", DataTable).focus()
 
     async def _delete_selected(self) -> None:
         tabs = self.query_one("#tabs", TabbedContent)

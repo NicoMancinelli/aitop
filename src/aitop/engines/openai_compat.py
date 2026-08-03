@@ -145,6 +145,7 @@ class OpenAICompatEngine(BaseEngine):
             self.kind.value,
             host=self.host,
             port=self.port,
+            container=self.endpoint.container,
         )
         return result.ok, result.message
 
@@ -156,6 +157,7 @@ class OpenAICompatEngine(BaseEngine):
             self.kind.value,
             pid=snap.pid,
             managed_by=snap.managed_by,
+            container=self.endpoint.container,
         )
         return result.ok, result.message
 
@@ -169,6 +171,7 @@ class OpenAICompatEngine(BaseEngine):
             managed_by=snap.managed_by,
             host=self.host,
             port=self.port,
+            container=self.endpoint.container,
         )
         return result.ok, result.message
 

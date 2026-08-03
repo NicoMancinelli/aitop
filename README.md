@@ -126,6 +126,7 @@ aitop update           # upgrade in place
 | `l` | load model (picker, or catalog selection) |
 | `u` | unload selected resident model |
 | `d` | delete catalog model from disk |
+| `p` | pull a model into the selected engine |
 | `a` | toggle offline engines |
 | `r` | force refresh |
 | `esc` | clear catalog filter |
@@ -162,11 +163,19 @@ aitop models search mlx-llama --tag mlx
 ```bash
 aitop serve                     # live UI + API (open http://127.0.0.1:9090/ui)
 aitop serve --host 0.0.0.0 -p 9090
+aitop serve --token change-me   # require Bearer token on control POSTs
+aitop serve --token change-me --auth-all   # also protect GET snapshot/stream
 aitop fleet                     # render local + configured remote snapshots
 aitop fleet --json              # machine-readable array of SystemSnapshots
 aitop metrics                   # one-shot Prometheus exposition (stdout)
 aitop config init               # write a starter ~/.config/aitop/config.yaml
 ```
+
+The web UI at `/ui` can start/stop/restart engines and load/unload/delete models
+via `POST /api/engines/…` and `POST /api/models/…`. When `--token` (or
+`fleet.serve_token`) is set, those POSTs need `Authorization: Bearer <token>`
+(or `X-Aitop-Token`). Paste the token into the header field on `/ui` — it is
+stored in `localStorage` only.
 
 `aitop doctor` is the first thing to run when something looks wrong — it reports the
 install method, which config file was loaded, which hardware probes activated, and
@@ -190,7 +199,7 @@ aitop/
 ├── config.py            Zero-config defaults, optional ~/.config/aitop/config.yaml
 ├── hub.py               Hugging Face model search (no huggingface_hub dependency)
 ├── prometheus.py        SystemSnapshot → Prometheus text exposition
-├── serve.py             Stdlib HTTP gateway: /ui + snapshot + SSE + WebSocket + /metrics
+├── serve.py             Stdlib HTTP gateway: /ui + snapshot + SSE + WS + /metrics + control API
 ├── engines/
 │   ├── base.py          BaseEngine ABC: detect / poll / start / stop / load / unload / delete / pull
 │   ├── lifecycle.py     systemd / launchd / docker / manual process control
@@ -245,9 +254,11 @@ ui:
 fleet:
   serve_host: 127.0.0.1
   serve_port: 9090
+  # serve_token: change-me
   nodes:
     - name: pveclaw
       url: http://100.100.1.7:9090
+      # token: change-me
 
 endpoints:
   - kind: ollama
@@ -255,6 +266,8 @@ endpoints:
     port: 11434
     name: pveclaw-ollama
     remote: true
+  - kind: ollama
+    container: ollama      # docker start/stop/restart by name
   - kind: lmstudio
     enabled: false         # never probe LM Studio on this box
 ```
@@ -264,7 +277,7 @@ endpoints:
 | Runtime   | Detect | Models | Residency | Load | Unload | Delete | Lifecycle | Pull |
 |-----------|:------:|:------:|:---------:|:----:|:------:|:------:|:---------:|:----:|
 | Ollama    | ✅ | ✅ | ✅ (incl. GPU offload %) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| LM Studio | ✅ | ✅ | ✅ (native API or `lms`)  | ✅ (`lms`) | ✅ (`lms`) | — | ✅ | — |
+| LM Studio | ✅ | ✅ | ✅ (native API or `lms`)  | ✅ (`lms`) | ✅ (`lms`) | ✅ (`lms remove`) | ✅ | ✅ (`lms get`) |
 | vLLM      | ✅ | ✅ | ✅ (listed = loaded) | — | — | — | ✅ | — |
 | llama-server | ✅ | ✅ | ✅ | — | — | — | ✅ | — |
 | MLX       | ✅ | ✅ | ✅ | — | — | — | ✅ | — |

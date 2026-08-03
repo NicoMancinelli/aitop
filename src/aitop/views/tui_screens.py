@@ -207,6 +207,65 @@ class FilterScreen(ModalScreen[str | None]):
         self.dismiss(event.value.strip())
 
 
+class PullScreen(ModalScreen[str | None]):
+    """Ask for a model id/tag to pull into the selected engine."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=True),
+        Binding("enter", "apply", "Pull", show=True),
+    ]
+
+    CSS = f"""
+    PullScreen {{
+        {_CSS_SURFACE}
+        background: rgba(14, 17, 22, 0.72);
+    }}
+    #pull-box {{
+        width: 56;
+        {_BOX}
+    }}
+    #pull-title {{
+        text-style: bold;
+        color: #39d2c0;
+        margin-bottom: 1;
+    }}
+    Input {{
+        background: #0e1116;
+        border: tall #30363d;
+    }}
+    Input:focus {{
+        border: tall #39d2c0;
+    }}
+    """
+
+    def __init__(self, engine_name: str) -> None:
+        super().__init__()
+        self._engine_name = engine_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pull-box"):
+            yield Label(f"Pull model into {self._engine_name}", id="pull-title")
+            yield Input(placeholder="llama3.2:3b  /  mlx-community/…", id="pull-input")
+            yield Static(
+                "[dim]enter pull · esc cancel[/]",
+                markup=True,
+            )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#pull-input", Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_apply(self) -> None:
+        value = self.query_one("#pull-input", Input).value.strip()
+        self.dismiss(value or None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip() or None)
+
+
 class HelpScreen(ModalScreen[None]):
     """Keybinding cheat sheet."""
 
@@ -241,6 +300,7 @@ class HelpScreen(ModalScreen[None]):
   [bold]s[/]  start selected engine     [bold]e[/]  restart (confirm)
   [bold]x[/]  stop selected engine      [bold]l[/]  load (picker, or catalog row)
   [bold]u[/]  unload resident model     [bold]d[/]  delete catalog model
+  [bold]p[/]  pull model into engine
 
 [bold #39d2c0]View[/]
   [bold]space[/]  pause / resume (status shows age while paused)

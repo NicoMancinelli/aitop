@@ -2,13 +2,15 @@
 
 `aitop serve` exposes the same `SystemSnapshot` every other consumer sees:
 
-  GET /                 -> redirect hint / service index
-  GET /ui               -> live HTML dashboard
-  GET /healthz          -> {"ok": true, "version": "..."}
-  GET /api/snapshot     -> SystemSnapshot JSON
-  GET /api/stream       -> text/event-stream of snapshots
-  GET /api/ws           -> WebSocket snapshot stream
-  GET /metrics          -> Prometheus text exposition
+  GET  /                 -> service index
+  GET  /ui               -> live HTML dashboard (with control actions)
+  GET  /healthz          -> {"ok": true, "version": "..."}
+  GET  /api/snapshot     -> SystemSnapshot JSON
+  GET  /api/stream       -> text/event-stream of snapshots
+  GET  /api/ws           -> WebSocket snapshot stream
+  GET  /metrics          -> Prometheus text exposition
+  POST /api/engines/{kind}/start|stop|restart
+  POST /api/models/load|unload|delete
 
 Implemented with the stdlib so the runtime dependency set stays small.
 """
@@ -32,7 +34,7 @@ import httpx
 
 from aitop.collector import SnapshotCollector
 from aitop.config import Config
-from aitop.models import SystemSnapshot
+from aitop.models import EngineKind, SystemSnapshot
 from aitop.version import __version__
 
 log = logging.getLogger(__name__)
@@ -45,7 +47,15 @@ _ENDPOINTS = [
     "/api/stream",
     "/api/ws",
     "/metrics",
+    "/api/engines/{kind}/start",
+    "/api/engines/{kind}/stop",
+    "/api/engines/{kind}/restart",
+    "/api/models/load",
+    "/api/models/unload",
+    "/api/models/delete",
 ]
+_PUBLIC_GET = frozenset({"/healthz"})
+_MUTATING_PREFIXES = ("/api/engines/", "/api/models/")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,15 +63,19 @@ class FleetNode:
     name: str
     url: str
     timeout: float = 3.0
+    token: str | None = None
 
 
 async def fetch_remote_snapshot(node: FleetNode) -> SystemSnapshot | None:
     """Pull one snapshot from a peer `aitop serve` endpoint."""
     base = node.url.rstrip("/")
     url = f"{base}/api/snapshot" if not base.endswith("/api/snapshot") else base
+    headers = {"User-Agent": f"aitop/{__version__}"}
+    if node.token:
+        headers["Authorization"] = f"Bearer {node.token}"
     try:
         async with httpx.AsyncClient(timeout=node.timeout, trust_env=False) as client:
-            response = await client.get(url, headers={"User-Agent": f"aitop/{__version__}"})
+            response = await client.get(url, headers=headers)
             response.raise_for_status()
             return SystemSnapshot.model_validate(response.json())
     except Exception as exc:
@@ -71,7 +85,7 @@ async def fetch_remote_snapshot(node: FleetNode) -> SystemSnapshot | None:
 
 def fleet_nodes_from_config(config: Config) -> list[FleetNode]:
     return [
-        FleetNode(name=n.name, url=n.url, timeout=n.timeout)
+        FleetNode(name=n.name, url=n.url, timeout=n.timeout, token=n.token)
         for n in config.fleet.nodes
         if n.enabled
     ]
@@ -94,7 +108,7 @@ async def merge_fleet(
 
 
 class SnapshotServer:
-    """Tiny async HTTP/1.1 server for snapshot, SSE, WebSocket, and /metrics."""
+    """Tiny async HTTP/1.1 server for snapshot, SSE, WebSocket, control, /metrics."""
 
     def __init__(
         self,
@@ -103,11 +117,15 @@ class SnapshotServer:
         host: str = "127.0.0.1",
         port: int = 9090,
         interval: float | None = None,
+        token: str | None = None,
+        auth_all: bool = False,
     ) -> None:
         self.collector = collector
         self.host = host
         self.port = port
         self.interval = interval or collector.config.polling.hardware_interval
+        self.token = token if token is not None else collector.config.fleet.serve_token
+        self.auth_all = auth_all or collector.config.fleet.serve_auth_all
         self._latest: SystemSnapshot | None = None
         self._lock = asyncio.Lock()
         self._server: asyncio.AbstractServer | None = None
@@ -137,6 +155,17 @@ class SnapshotServer:
         async with self._server:
             await self._server.serve_forever()
 
+    def _authorized(self, headers: dict[str, str], *, mutating: bool) -> bool:
+        if not self.token:
+            return True
+        if not mutating and not self.auth_all:
+            return True
+        provided = headers.get("x-aitop-token")
+        auth = headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            provided = auth[7:].strip()
+        return bool(provided) and provided == self.token
+
     async def _handle(
         self,
         reader: asyncio.StreamReader,
@@ -159,10 +188,35 @@ class SnapshotServer:
                     headers[key.strip().lower()] = value.strip()
 
             method, raw_path, *_ = request_line.decode("latin-1", "replace").split()
-            path = urlparse(raw_path).path
+            parsed = urlparse(raw_path)
+            path = parsed.path
+            length = int(headers.get("content-length", "0") or "0")
+            body = await reader.readexactly(length) if length > 0 else b""
+
+            if method == "OPTIONS":
+                await self._write_cors(writer)
+                return
+
+            mutating = method in {"POST", "PUT", "PATCH", "DELETE"} or any(
+                path.startswith(p) and method != "GET" for p in _MUTATING_PREFIXES
+            )
+            # Control POSTs are always mutating; optionally gate all GETs.
+            needs_auth = mutating or (
+                self.auth_all and path not in _PUBLIC_GET and method == "GET"
+            )
+            if needs_auth and not self._authorized(headers, mutating=True):
+                await self._write(writer, 401, {"error": "unauthorized"})
+                return
 
             if method == "GET" and path == "/api/ws":
+                if self.auth_all and not self._authorized(headers, mutating=True):
+                    await self._write(writer, 401, {"error": "unauthorized"})
+                    return
                 keep_open = await self._websocket(reader, writer, headers)
+                return
+
+            if method == "POST":
+                await self._handle_post(writer, path, body)
                 return
 
             if method != "GET":
@@ -177,6 +231,8 @@ class SnapshotServer:
                         "service": "aitop",
                         "version": __version__,
                         "ui": "/ui",
+                        "auth_required": bool(self.token and self.auth_all),
+                        "control_auth_required": bool(self.token),
                         "endpoints": _ENDPOINTS,
                     },
                 )
@@ -186,7 +242,7 @@ class SnapshotServer:
                 await self._write_raw(
                     writer,
                     200,
-                    render_dashboard(),
+                    render_dashboard(auth_required=bool(self.token)),
                     content_type="text/html; charset=utf-8",
                 )
             elif path == "/healthz":
@@ -206,11 +262,11 @@ class SnapshotServer:
                 from aitop.prometheus import render_prometheus
 
                 snapshot = await self.latest()
-                body = render_prometheus(snapshot).encode()
+                body_out = render_prometheus(snapshot).encode()
                 await self._write_raw(
                     writer,
                     200,
-                    body,
+                    body_out,
                     content_type="text/plain; version=0.0.4; charset=utf-8",
                 )
             else:
@@ -225,6 +281,93 @@ class SnapshotServer:
                     writer.close()
                     await writer.wait_closed()
 
+    async def _handle_post(
+        self,
+        writer: asyncio.StreamWriter,
+        path: str,
+        body: bytes,
+    ) -> None:
+        payload: dict[str, Any] = {}
+        if body:
+            try:
+                parsed = json.loads(body.decode())
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                await self._write(writer, 400, {"error": "invalid json"})
+                return
+
+        # /api/engines/{kind}/{action}
+        if path.startswith("/api/engines/"):
+            parts = [p for p in path.strip("/").split("/") if p]
+            # api, engines, kind, action
+            if len(parts) != 4:
+                await self._write(writer, 404, {"error": "not found"})
+                return
+            kind_raw, action = parts[2], parts[3]
+            if action not in {"start", "stop", "restart"}:
+                await self._write(writer, 404, {"error": "unknown action"})
+                return
+            ok, message = await self._engine_action(kind_raw, action)
+            await self._write(writer, 200 if ok else 400, {"ok": ok, "message": message})
+            await self.refresh()
+            return
+
+        if path in {"/api/models/load", "/api/models/unload", "/api/models/delete"}:
+            action = path.rsplit("/", 1)[-1]
+            engine_raw = str(payload.get("engine") or "")
+            model = payload.get("model")
+            model_id = str(model) if model is not None else None
+            if action != "unload" and not model_id:
+                await self._write(writer, 400, {"error": "model required"})
+                return
+            ok, message = await self._model_action(engine_raw, action, model_id)
+            await self._write(writer, 200 if ok else 400, {"ok": ok, "message": message})
+            await self.refresh()
+            return
+
+        await self._write(writer, 404, {"error": "not found"})
+
+    async def _engine_action(self, kind_raw: str, action: str) -> tuple[bool, str]:
+        engine = self._find_engine(kind_raw)
+        if engine is None:
+            return False, f"no adapter for {kind_raw}"
+        if not engine.supports("lifecycle"):
+            return False, f"{engine.name} has no lifecycle control"
+        return await getattr(engine, action)()
+
+    async def _model_action(
+        self, kind_raw: str, action: str, model_id: str | None
+    ) -> tuple[bool, str]:
+        engine = self._find_engine(kind_raw)
+        if engine is None:
+            return False, f"no adapter for {kind_raw}"
+        if not engine.supports(action):
+            return False, f"{engine.name} cannot {action}"
+        if action == "unload":
+            return await engine.unload(model_id)
+        if action == "load":
+            assert model_id is not None
+            return await engine.load(model_id)
+        if action == "delete":
+            assert model_id is not None
+            return await engine.delete(model_id)
+        return False, f"unknown action {action}"
+
+    def _find_engine(self, kind_raw: str):
+        needle = kind_raw.strip().lower().replace("_", "-")
+        engines = self.collector.engines.engines
+        for eng in engines:
+            if eng.kind.value == needle or eng.name.lower() == needle:
+                return eng
+        # Accept enum aliases like lmstudio
+        with contextlib.suppress(ValueError):
+            kind = EngineKind(needle)
+            for eng in engines:
+                if eng.kind is kind:
+                    return eng
+        return None
+
     async def _write_sse(self, writer: asyncio.StreamWriter) -> None:
         header = (
             "HTTP/1.1 200 OK\r\n"
@@ -232,6 +375,7 @@ class SnapshotServer:
             "Cache-Control: no-cache\r\n"
             "Connection: keep-alive\r\n"
             "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Headers: Authorization, Content-Type, X-Aitop-Token\r\n"
             "\r\n"
         )
         writer.write(header.encode())
@@ -272,7 +416,6 @@ class SnapshotServer:
         await writer.drain()
 
         async def _drain_client() -> None:
-            # Consume (and ignore) client frames so the TCP window stays open.
             try:
                 while True:
                     header = await reader.readexactly(2)
@@ -287,9 +430,9 @@ class SnapshotServer:
                     payload = await reader.readexactly(length)
                     if masked:
                         payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-                    if opcode == 0x8:  # close
+                    if opcode == 0x8:
                         return
-                    if opcode == 0x9:  # ping -> pong
+                    if opcode == 0x9:
                         writer.write(_ws_frame(payload, opcode=0xA))
                         await writer.drain()
             except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
@@ -313,6 +456,19 @@ class SnapshotServer:
                 await writer.wait_closed()
         return True
 
+    async def _write_cors(self, writer: asyncio.StreamWriter) -> None:
+        header = (
+            "HTTP/1.1 204 No Content\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Authorization, Content-Type, X-Aitop-Token\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+        writer.write(header.encode())
+        await writer.drain()
+
     async def _write(self, writer: asyncio.StreamWriter, status: int, body: dict[str, Any]) -> None:
         await self._write_raw(
             writer,
@@ -331,7 +487,9 @@ class SnapshotServer:
     ) -> None:
         reason = {
             200: "OK",
+            204: "No Content",
             400: "Bad Request",
+            401: "Unauthorized",
             404: "Not Found",
             405: "Method Not Allowed",
             500: "Internal Server Error",
@@ -341,6 +499,7 @@ class SnapshotServer:
             f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(body)}\r\n"
             "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Headers: Authorization, Content-Type, X-Aitop-Token\r\n"
             f"Date: {datetime.now(UTC).strftime('%a, %d %b %Y %H:%M:%S GMT')}\r\n"
             "Connection: close\r\n"
             "\r\n"

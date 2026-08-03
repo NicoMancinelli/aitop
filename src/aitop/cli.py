@@ -136,6 +136,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="never invoke sudo helpers such as powermetrics",
     )
+    serve.add_argument(
+        "--token",
+        default=None,
+        help="bearer token for control API (or AITOP_SERVE_TOKEN / fleet.serve_token)",
+    )
+    serve.add_argument(
+        "--auth-all",
+        action="store_true",
+        help="require the token on all routes except /healthz",
+    )
 
     fleet = subparsers.add_parser(
         "fleet",
@@ -456,17 +466,27 @@ def _run_tui(args: argparse.Namespace, config: Config) -> int:
 
 
 async def _run_serve(args: argparse.Namespace, config: Config, console: Console) -> int:
+    import os
+
     host = args.host or config.fleet.serve_host
     port = args.port or config.fleet.serve_port
+    token = args.token or os.environ.get("AITOP_SERVE_TOKEN") or config.fleet.serve_token
     collector = SnapshotCollector(config, allow_privileged=not args.no_privileged)
     server = SnapshotServer(
         collector,
         host=host,
         port=port,
         interval=args.interval,
+        token=token,
+        auth_all=bool(args.auth_all) or config.fleet.serve_auth_all,
     )
     console.print(f"[bold]aitop serve[/] http://{host}:{port}/ui")
-    console.print("[dim]/ui  /healthz  /api/snapshot  /api/stream  /api/ws  /metrics[/]")
+    console.print(
+        "[dim]/ui  /healthz  /api/snapshot  /api/stream  /api/ws  /metrics  "
+        "POST /api/engines/…  POST /api/models/…[/]"
+    )
+    if token:
+        console.print("[dim]control endpoints require Authorization: Bearer <token>[/]")
     try:
         await server.run()
     finally:
@@ -624,15 +644,20 @@ updates:
 fleet:
   serve_host: 127.0.0.1
   serve_port: 9090
+  # serve_token: change-me          # require Bearer token on control POSTs
+  # serve_auth_all: false           # also protect GET /api/snapshot etc.
   # nodes:
   #   - name: pveclaw
   #     url: http://100.100.1.7:9090
+  #     token: change-me
 
 # endpoints:
 #   - kind: ollama
 #     host: 100.100.1.7
 #     name: pveclaw-ollama
 #     remote: true
+#   - kind: ollama
+#     container: ollama              # docker start/stop/restart by name
 #   - kind: lmstudio
 #     enabled: false
 """
