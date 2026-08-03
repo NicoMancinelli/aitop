@@ -112,6 +112,27 @@ aitop doctor           # what telemetry is available on this machine, and what i
 aitop update           # upgrade in place
 ```
 
+### TUI keys
+
+| Key | Action |
+|-----|--------|
+| `?` | help overlay |
+| `space` | pause / resume live refresh |
+| `1` `2` `3` | jump to Engines / Catalog / Loaded |
+| `tab` | cycle focus |
+| `/` | filter catalog (name / quant / runtime) |
+| `o` | cycle catalog sort (name → size → state) |
+| `s` / `e` / `x` | start / restart / stop selected engine |
+| `l` | load model (picker, or catalog selection) |
+| `u` | unload selected resident model |
+| `d` | delete catalog model from disk |
+| `a` | toggle offline engines |
+| `r` | force refresh |
+| `esc` | clear catalog filter |
+| `q` | quit |
+
+The status strip shows Tailscale peers, hardware probe warnings, and snapshot age while paused. Cursor selection fills the detail strip (pid, managed-by, errors, format, VRAM).
+
 ### Lifecycle
 
 ```bash

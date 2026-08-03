@@ -9,21 +9,24 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import deque
+from datetime import UTC, datetime
 from typing import Any
 
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, RichLog, Static
+from textual.containers import Horizontal
+from textual.widgets import DataTable, Footer, Header, RichLog, Static, TabbedContent, TabPane
 
 from aitop.bus import EventBus, Topic
 from aitop.collector import SnapshotCollector
 from aitop.config import Config
-from aitop.models import EngineState, SystemSnapshot
+from aitop.models import BindScope, EngineSnapshot, EngineState, SystemSnapshot
 from aitop.utils.fmt import (
     bytes_human,
+    celsius,
+    core_bars,
     heat_color,
     percent,
     ratio_bar,
@@ -31,22 +34,32 @@ from aitop.utils.fmt import (
     sparkline,
     watts,
 )
+from aitop.views.tui_screens import ConfirmScreen, FilterScreen, HelpScreen, ModelPickerScreen
 
-_HISTORY = 48
+_HISTORY = 56
+_EMPTY = "__empty__"
+_SORT_MODES = ("name", "size", "state")
+
+_STATE = {
+    EngineState.ONLINE: ("●", "green"),
+    EngineState.DEGRADED: ("◐", "yellow"),
+    EngineState.OFFLINE: ("○", "dim"),
+    EngineState.UNKNOWN: ("?", "dim"),
+}
+
+_SCOPE_STYLE = {
+    BindScope.LOOPBACK: "green",
+    BindScope.LAN: "yellow",
+    BindScope.TAILSCALE: "#d2a8ff",
+    BindScope.OTHER: "dim",
+}
 
 
 class MetricPanel(Static):
-    """One labelled gauge block (CPU / memory / GPU) with a sparkline history."""
+    """One labelled gauge block (CPU / memory / GPU) with history."""
 
-    DEFAULT_CSS = """
-    MetricPanel {
-        height: auto;
-        border: tall $surface;
-        padding: 0 1;
-        margin: 0 1 1 0;
-        width: 1fr;
-    }
-    """
+    # Gauges are display-only — keep them out of the Tab focus cycle.
+    can_focus = False
 
     def __init__(self, title: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -55,13 +68,83 @@ class MetricPanel(Static):
 
     def render(self) -> Text:
         out = Text()
-        out.append(f"{self._title}\n", style="bold cyan")
+        out.append(f"{self._title}\n", style="bold #39d2c0")
         out.append(self._body)
         return out
 
     def update_metric(self, body: Text) -> None:
         self._body = body
         self.refresh()
+
+
+class StatusBar(Static):
+    """Status strip: pause, filters, network, degraded probes."""
+
+    can_focus = False
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._text = Text("")
+
+    def render(self) -> Text:
+        return self._text
+
+    def update_status(self, text: Text) -> None:
+        self._text = text
+        self.refresh()
+
+
+class DetailBar(Static):
+    """Selection inspector under the tables — pid, errors, format, etc."""
+
+    can_focus = False
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._text = Text("select a row for details", style="dim")
+
+    def render(self) -> Text:
+        return self._text
+
+    def update_detail(self, text: Text) -> None:
+        self._text = text
+        self.refresh()
+
+
+def _row_key(table: DataTable) -> str | None:
+    if table.row_count == 0:
+        return None
+    with contextlib.suppress(Exception):
+        cell = table.coordinate_to_cell_key(table.cursor_coordinate)
+        if cell.row_key is not None and cell.row_key.value is not None:
+            key = str(cell.row_key.value)
+            return None if key == _EMPTY else key
+    return None
+
+
+def _restore_cursor(table: DataTable, key: str | None) -> None:
+    if key is None or table.row_count == 0:
+        return
+    with contextlib.suppress(Exception):
+        table.move_cursor(row=table.get_row_index(key), animate=False)
+
+
+def _engine_key(eng: EngineSnapshot) -> str:
+    binding = str(eng.binding) if eng.binding else ""
+    return f"{eng.kind.value}|{binding}|{eng.name}"
+
+
+def _age_label(when: datetime | None) -> str:
+    if when is None:
+        return "—"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    secs = max(0, int((datetime.now(UTC) - when).total_seconds()))
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    return f"{secs // 3600}h ago"
 
 
 class AiTopApp(App[None]):
@@ -71,41 +154,93 @@ class AiTopApp(App[None]):
     SUB_TITLE = "AI neofetch · btop"
     CSS = """
     Screen {
-        layout: vertical;
+        background: #0e1116;
+    }
+    Header {
+        background: #161b22;
+        color: #e6edf3;
+    }
+    Footer {
+        background: #161b22;
     }
     #metrics {
-        height: 8;
+        height: 11;
         padding: 1 0 0 1;
+        background: #0e1116;
     }
-    #engines {
+    MetricPanel {
         height: 1fr;
-        border: tall $surface;
+        border: tall #30363d;
+        background: #161b22;
+        padding: 0 1;
+        margin: 0 1 0 0;
+        width: 1fr;
+    }
+    #status {
+        height: 1;
+        padding: 0 2;
+        color: #8b949e;
+        background: #0e1116;
+    }
+    #tabs {
+        height: 1fr;
         margin: 0 1;
     }
-    #loaded {
+    TabbedContent {
         height: 1fr;
-        border: tall $surface;
-        margin: 0 1;
     }
-    #log {
-        height: 6;
-        border: tall $surface;
-        margin: 0 1 1 1;
+    TabPane {
+        padding: 0;
     }
     DataTable {
         height: 1fr;
+        background: #161b22;
+    }
+    DataTable > .datatable--cursor {
+        background: #1f6feb;
+        color: #ffffff;
+    }
+    DataTable > .datatable--hover {
+        background: #21262d;
+    }
+    #detail {
+        height: 2;
+        padding: 0 2;
+        color: #8b949e;
+        background: #0e1116;
+    }
+    #log {
+        height: 6;
+        border: tall #30363d;
+        background: #161b22;
+        margin: 0 1 1 1;
+        scrollbar-background: #161b22;
+        scrollbar-color: #30363d;
+    }
+    #log:focus {
+        border: tall #39d2c0;
     }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("question_mark", "help", "Help"),
         Binding("r", "refresh", "Refresh"),
+        Binding("space", "toggle_pause", "Pause"),
+        Binding("a", "toggle_offline", "All"),
+        Binding("slash", "filter_catalog", "Filter"),
+        Binding("o", "cycle_sort", "Sort"),
         Binding("u", "unload", "Unload"),
         Binding("l", "load", "Load"),
+        Binding("d", "delete_model", "Delete"),
         Binding("s", "start_engine", "Start"),
         Binding("x", "stop_engine", "Stop"),
+        Binding("e", "restart_engine", "Restart"),
+        Binding("1", "tab_engines", "Engines", show=False),
+        Binding("2", "tab_catalog", "Catalog", show=False),
+        Binding("3", "tab_loaded", "Loaded", show=False),
         Binding("j", "json_dump", "JSON", show=False),
-        Binding("?", "help", "Help", show=False),
+        Binding("escape", "clear_filter", "Clear filter", show=False),
     ]
 
     def __init__(
@@ -130,6 +265,13 @@ class AiTopApp(App[None]):
         self._cpu_hist: deque[float] = deque(maxlen=_HISTORY)
         self._mem_hist: deque[float] = deque(maxlen=_HISTORY)
         self._gpu_hist: deque[float] = deque(maxlen=_HISTORY)
+        self._vram_hist: deque[float] = deque(maxlen=_HISTORY)
+        self.paused = False
+        self.show_offline = False
+        self.catalog_filter = ""
+        self.catalog_sort = "name"
+        self._pending: SystemSnapshot | None = None
+        self._logged_errors: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -137,24 +279,44 @@ class AiTopApp(App[None]):
             yield MetricPanel("CPU", id="cpu")
             yield MetricPanel("Memory", id="memory")
             yield MetricPanel("GPU", id="gpu")
-        with Vertical():
-            yield DataTable(id="engines", cursor_type="row", zebra_stripes=True)
-            yield DataTable(id="loaded", cursor_type="row", zebra_stripes=True)
-            yield RichLog(id="log", highlight=True, markup=True)
+        yield StatusBar(id="status")
+        with TabbedContent(id="tabs"):
+            with TabPane("Engines", id="tab-engines"):
+                yield DataTable(id="engines", cursor_type="row", zebra_stripes=True)
+            with TabPane("Catalog", id="tab-catalog"):
+                yield DataTable(id="catalog", cursor_type="row", zebra_stripes=True)
+            with TabPane("Loaded", id="tab-loaded"):
+                yield DataTable(id="loaded", cursor_type="row", zebra_stripes=True)
+        yield DetailBar(id="detail")
+        yield RichLog(id="log", highlight=True, markup=True, max_lines=500)
         yield Footer()
 
     def on_mount(self) -> None:
         engines = self.query_one("#engines", DataTable)
         engines.add_columns(
-            "State", "Runtime", "Endpoint", "Version", "Models", "Resident", "tok/s", "ms"
+            "State",
+            "Runtime",
+            "Endpoint",
+            "Scope",
+            "Ver",
+            "Models",
+            "Resident",
+            "tok/s",
+            "Q",
+            "ms",
         )
+        catalog = self.query_one("#catalog", DataTable)
+        catalog.add_columns("Model", "Runtime", "Params", "Quant", "Size", "Ctx", "State")
         loaded = self.query_one("#loaded", DataTable)
-        loaded.add_columns("Model", "Engine", "Size", "GPU", "Context", "Expires")
+        loaded.add_columns(
+            "Model", "Runtime", "Params", "Quant", "Size", "GPU", "Context", "Expires"
+        )
         self.query_one("#log", RichLog).write(
-            "[dim]aitop tui — q quit · r refresh · u unload · l load · s start · x stop[/]"
+            "[dim]aitop tui — [bold]?[/] help · space pause · / filter · 1/2/3 panes[/]"
         )
         self._stream_task = asyncio.create_task(self._run_collector())
         self._consume_bus()
+        self.set_focus(engines)
 
     async def on_unmount(self) -> None:
         if self._stream_task is not None:
@@ -175,6 +337,10 @@ class AiTopApp(App[None]):
         try:
             async for event in sub:
                 if event.topic is Topic.SNAPSHOT and isinstance(event.payload, SystemSnapshot):
+                    if self.paused:
+                        self._pending = event.payload
+                        self._render_status(event.payload)
+                        continue
                     self.snapshot = event.payload
                     self._render_snapshot(event.payload)
                 elif event.topic in (Topic.LOG, Topic.LIFECYCLE, Topic.ERROR):
@@ -182,18 +348,56 @@ class AiTopApp(App[None]):
         finally:
             sub.close()
 
+    def on_data_table_row_highlighted(self, _event: DataTable.RowHighlighted) -> None:
+        self._render_detail()
+
+    def on_tabbed_content_tab_activated(self, _event: TabbedContent.TabActivated) -> None:
+        self._render_detail()
+
+    # -- rendering ---------------------------------------------------------- #
+
     def _render_snapshot(self, snap: SystemSnapshot) -> None:
+        self._render_metrics(snap)
+        self._render_engines(snap)
+        self._render_catalog(snap)
+        self._render_loaded(snap)
+        self._render_status(snap)
+        self._render_detail()
+        self._log_new_errors(snap)
+
+        host = snap.hardware.host.hostname
+        online = len(snap.online_engines)
+        pause = " · PAUSED" if self.paused else ""
+        filt = f" · /{self.catalog_filter}" if self.catalog_filter else ""
+        self.sub_title = (
+            f"{host} · {online} online · {snap.duration_ms or 0:.0f} ms{pause}{filt}"
+        )
+
+    def _render_metrics(self, snap: SystemSnapshot) -> None:
         hw = snap.hardware
         cpu = hw.cpu
         self._cpu_hist.append(cpu.load_percent)
         cpu_body = Text()
-        cpu_body.append(f"{cpu.model}\n")
+        cores = ""
+        if cpu.logical_cores:
+            cores = f" · {cpu.logical_cores}t"
+            if cpu.physical_cores and cpu.physical_cores != cpu.logical_cores:
+                cores = f" · {cpu.physical_cores}c/{cpu.logical_cores}t"
+        cpu_body.append(f"{cpu.model}{cores}\n")
         frac = cpu.load_percent / 100.0
-        cpu_body.append(ratio_bar(frac, width=24), style=heat_color(frac))
+        cpu_body.append(ratio_bar(frac, width=22), style=heat_color(frac))
         cpu_body.append(f"  {percent(cpu.load_percent)}")
+        extras: list[str] = []
         if cpu.power_watts is not None:
-            cpu_body.append(f"  {watts(cpu.power_watts)}", style="dim")
-        cpu_body.append(f"\n{sparkline(list(self._cpu_hist))}", style="cyan")
+            extras.append(watts(cpu.power_watts))
+        if cpu.temperature_c is not None:
+            extras.append(celsius(cpu.temperature_c))
+        if extras:
+            cpu_body.append(f"  {' · '.join(extras)}", style="dim")
+        cpu_body.append(f"\n{sparkline(list(self._cpu_hist), width=28)}", style="#39d2c0")
+        if cpu.per_core_percent:
+            cpu_body.append("\n")
+            cpu_body.append(core_bars(cpu.per_core_percent, width=3, cols=8))
         self.query_one("#cpu", MetricPanel).update_metric(cpu_body)
 
         mem = hw.memory
@@ -204,85 +408,426 @@ class AiTopApp(App[None]):
             f"{bytes_human(mem.used_bytes)} / {bytes_human(mem.total_bytes)} ({label})\n"
         )
         mfrac = mem.used_percent / 100.0
-        mem_body.append(ratio_bar(mfrac, width=24), style=heat_color(mfrac))
+        mem_body.append(ratio_bar(mfrac, width=22), style=heat_color(mfrac))
         mem_body.append(f"  {percent(mem.used_percent)}")
-        mem_body.append(f"\n{sparkline(list(self._mem_hist))}", style="cyan")
+        if mem.swap_total_bytes:
+            mem_body.append(
+                f"\nswap {bytes_human(mem.swap_used_bytes)} / {bytes_human(mem.swap_total_bytes)}",
+                style="dim",
+            )
+        mem_body.append(f"\n{sparkline(list(self._mem_hist), width=28)}", style="#39d2c0")
         self.query_one("#memory", MetricPanel).update_metric(mem_body)
 
         gpu_body = Text()
         if not hw.gpus:
             self._gpu_hist.append(0.0)
+            self._vram_hist.append(0.0)
             gpu_body.append("no GPU detected\n", style="dim")
-            gpu_body.append(sparkline(list(self._gpu_hist)), style="dim")
+            gpu_body.append(sparkline(list(self._gpu_hist), width=28), style="dim")
         else:
             util = hw.gpus[0].utilization_percent or 0.0
             self._gpu_hist.append(util)
+            vram_pct = hw.gpus[0].vram_used_percent or 0.0
+            self._vram_hist.append(vram_pct)
             for gpu in hw.gpus[:2]:
-                gpu_body.append(f"{gpu.name}\n")
+                driver = f" · {gpu.driver_version}" if gpu.driver_version else ""
+                gpu_body.append(f"{gpu.name}{driver}\n")
                 gfrac = (gpu.utilization_percent or 0) / 100.0
-                gpu_body.append(ratio_bar(gfrac, width=24), style=heat_color(gfrac))
+                gpu_body.append(ratio_bar(gfrac, width=22), style=heat_color(gfrac))
                 gpu_body.append(f"  {percent(gpu.utilization_percent)}")
+                bits: list[str] = []
+                if gpu.power_watts is not None:
+                    bits.append(watts(gpu.power_watts))
+                if gpu.temperature_c is not None:
+                    bits.append(celsius(gpu.temperature_c))
+                if bits:
+                    gpu_body.append(f"  {' · '.join(bits)}", style="dim")
                 if gpu.vram_total_bytes:
                     gpu_body.append(
                         f"\nVRAM {bytes_human(gpu.vram_used_bytes)} / "
                         f"{bytes_human(gpu.vram_total_bytes)}",
                         style="dim",
                     )
-                if gpu.power_watts is not None:
-                    gpu_body.append(f"  {watts(gpu.power_watts)}", style="dim")
                 gpu_body.append("\n")
-            gpu_body.append(sparkline(list(self._gpu_hist)), style="cyan")
+            gpu_body.append("util ", style="dim")
+            gpu_body.append(sparkline(list(self._gpu_hist), width=24), style="#39d2c0")
+            gpu_body.append("\nvram ", style="dim")
+            gpu_body.append(sparkline(list(self._vram_hist), width=24), style="#d2a8ff")
         self.query_one("#gpu", MetricPanel).update_metric(gpu_body)
 
-        engines = self.query_one("#engines", DataTable)
-        engines.clear()
-        for eng in snap.engines:
-            mark, style = {
-                EngineState.ONLINE: ("●", "green"),
-                EngineState.DEGRADED: ("◐", "yellow"),
-                EngineState.OFFLINE: ("○", "dim"),
-                EngineState.UNKNOWN: ("?", "dim"),
-            }.get(eng.state, ("?", "dim"))
-            binding = str(eng.binding) if eng.binding else "—"
+    def _render_engines(self, snap: SystemSnapshot) -> None:
+        table = self.query_one("#engines", DataTable)
+        prev = _row_key(table)
+        table.clear()
+        engines = snap.engines if self.show_offline else snap.online_engines
+        if not engines:
+            hint = (
+                "no AI runtimes reachable — start Ollama / LM Studio, or press a for offline"
+                if not self.show_offline
+                else "no engines configured — add endpoints in ~/.config/aitop/config.yaml"
+            )
+            table.add_row(Text("○", style="dim"), Text(hint, style="dim"), key=_EMPTY)
+            return
+        for eng in engines:
+            mark, style = _STATE.get(eng.state, ("?", "dim"))
+            binding = eng.binding
+            endpoint = str(binding) if binding else "—"
+            scope = binding.scope if binding else BindScope.OTHER
             tps = (
                 f"{eng.stats.tokens_per_second:.1f}"
                 if eng.stats.tokens_per_second is not None
                 else "—"
             )
-            engines.add_row(
+            queue = str(eng.stats.queue_depth) if eng.stats.queue_depth else "—"
+            name = eng.name
+            if eng.error:
+                name = Text(eng.name, style="yellow")
+            table.add_row(
                 Text(mark, style=style),
-                eng.name,
-                binding,
-                eng.version or "—",
+                name,
+                endpoint,
+                Text(scope.value, style=_SCOPE_STYLE.get(scope, "dim")),
+                (eng.version or "—")[:12],
                 str(len(eng.models)),
                 bytes_human(eng.resident_bytes) if eng.loaded else "—",
                 tps,
+                queue,
                 f"{eng.latency_ms:.0f}" if eng.latency_ms is not None else "—",
-                key=f"{eng.kind.value}",
+                key=_engine_key(eng),
             )
+        _restore_cursor(table, prev)
 
-        loaded = self.query_one("#loaded", DataTable)
-        loaded.clear()
-        for model in snap.all_loaded:
-            gpu = percent(model.gpu_fraction * 100 if model.gpu_fraction is not None else None)
-            ctx = (
-                f"{model.context_used or '—'}/{model.context_length}"
-                if model.context_length
-                else "—"
+    def _render_catalog(self, snap: SystemSnapshot) -> None:
+        table = self.query_one("#catalog", DataTable)
+        prev = _row_key(table)
+        table.clear()
+        engines = snap.engines if self.show_offline else snap.online_engines
+        rows: list[tuple[str, str, str, str, int | None, str, Text, str]] = []
+        needle = self.catalog_filter.lower()
+        for eng in engines:
+            loaded_ids = {m.id for m in eng.loaded}
+            for model in eng.models:
+                hay = " ".join(
+                    filter(
+                        None,
+                        [
+                            model.name,
+                            model.id,
+                            eng.name,
+                            model.parameter_size,
+                            model.quantization,
+                            model.family,
+                            model.format,
+                        ],
+                    )
+                ).lower()
+                if needle and needle not in hay:
+                    continue
+                state = "● resident" if model.id in loaded_ids else "○ disk"
+                style = "green" if model.id in loaded_ids else "dim"
+                rows.append(
+                    (
+                        model.name,
+                        eng.name,
+                        model.parameter_size or "—",
+                        model.quantization or "—",
+                        model.size_bytes,
+                        str(model.max_context) if model.max_context else "—",
+                        Text(state, style=style),
+                        f"{eng.kind.value}:{model.id}",
+                    )
+                )
+
+        if self.catalog_sort == "size":
+            rows.sort(key=lambda r: r[4] or 0, reverse=True)
+        elif self.catalog_sort == "state":
+            rows.sort(key=lambda r: (0 if "resident" in r[6].plain else 1, r[0].lower()))
+        else:
+            rows.sort(key=lambda r: r[0].lower())
+
+        if not rows:
+            msg = (
+                f"no models match /{self.catalog_filter}"
+                if self.catalog_filter
+                else "no models on disk — pull one or wait for engines to come online"
             )
-            loaded.add_row(
+            table.add_row(Text(msg, style="dim"), key=_EMPTY)
+            return
+
+        for name, runtime, params, quant, size, ctx, state, key in rows:
+            table.add_row(
+                name,
+                runtime,
+                params,
+                quant,
+                bytes_human(size),
+                ctx,
+                state,
+                key=key,
+            )
+        _restore_cursor(table, prev)
+
+    def _render_loaded(self, snap: SystemSnapshot) -> None:
+        table = self.query_one("#loaded", DataTable)
+        prev = _row_key(table)
+        table.clear()
+        models = snap.all_loaded
+        if not models:
+            table.add_row(
+                Text("nothing resident — press l to load, or 2 for catalog", style="dim"),
+                key=_EMPTY,
+            )
+            return
+        for model in models:
+            gpu = percent(model.gpu_fraction * 100 if model.gpu_fraction is not None else None)
+            if model.context_fill is not None and model.context_length:
+                bar = ratio_bar(model.context_fill, width=8)
+                ctx = Text()
+                ctx.append(bar, style=heat_color(model.context_fill))
+                ctx.append(
+                    f" {model.context_used or 0}/{model.context_length}",
+                    style="dim",
+                )
+            elif model.context_length:
+                ctx = Text(f"{model.context_used or '—'}/{model.context_length}")
+            else:
+                ctx = Text("—")
+            table.add_row(
                 model.name,
                 model.engine.value,
+                model.parameter_size or "—",
+                model.quantization or "—",
                 bytes_human(model.size_bytes),
                 gpu,
                 ctx,
                 relative_time(model.expires_at),
                 key=f"{model.engine.value}:{model.id}",
             )
+        _restore_cursor(table, prev)
 
-        host = hw.host.hostname
-        online = len(snap.online_engines)
-        self.sub_title = f"{host} · {online} runtime(s) online · {snap.duration_ms or 0:.0f} ms"
+    def _render_status(self, snap: SystemSnapshot) -> None:
+        text = Text()
+        if self.paused:
+            text.append(" PAUSED ", style="bold reverse #d29922")
+            text.append(f" {_age_label(snap.collected_at)}  ", style="#d29922")
+        text.append(f"engines {len(snap.online_engines)}/{len(snap.engines)}")
+        text.append("  ·  ")
+        text.append(f"loaded {len(snap.all_loaded)}")
+        if self.show_offline:
+            text.append("  ·  ")
+            text.append("showing offline", style="#d29922")
+        if self.catalog_filter:
+            text.append("  ·  ")
+            text.append(f"/{self.catalog_filter}", style="#39d2c0")
+        if self.catalog_sort != "name":
+            text.append("  ·  ")
+            text.append(f"sort:{self.catalog_sort}", style="dim")
+        ts = snap.tailscale
+        if ts.available and ts.running:
+            text.append("  ·  ")
+            parts = ["tailscale"]
+            if ts.ipv4:
+                parts.append(ts.ipv4)
+            if ts.hostname:
+                parts.append(ts.hostname)
+            if ts.tailnet:
+                parts.append(ts.tailnet)
+            if ts.peer_count:
+                parts.append(f"{ts.peer_count} peers")
+            text.append(" ".join(parts), style="#39d2c0")
+        if snap.hardware.total_power_watts is not None:
+            text.append("  ·  ")
+            text.append(watts(snap.hardware.total_power_watts), style="dim")
+        if snap.hardware.degraded:
+            text.append("  ·  ")
+            text.append(f"! {snap.hardware.degraded[0]}", style="yellow")
+        self.query_one("#status", StatusBar).update_status(text)
+
+    def _render_detail(self) -> None:
+        snap = self.snapshot
+        bar = self.query_one("#detail", DetailBar)
+        if snap is None:
+            bar.update_detail(Text("waiting for first snapshot…", style="dim"))
+            return
+
+        tabs = self.query_one("#tabs", TabbedContent)
+        active = tabs.active
+
+        if active == "tab-engines":
+            key = _row_key(self.query_one("#engines", DataTable))
+            if key is None:
+                bar.update_detail(
+                    Text("no engine selected — start a runtime or press a", style="dim")
+                )
+                return
+            eng = next((e for e in snap.engines if _engine_key(e) == key), None)
+            if eng is None:
+                bar.update_detail(Text("—", style="dim"))
+                return
+            parts: list[str] = [eng.name, eng.state.value]
+            if eng.pid:
+                parts.append(f"pid {eng.pid}")
+            if eng.managed_by:
+                parts.append(f"via {eng.managed_by}")
+            if eng.remote:
+                parts.append("remote")
+            if eng.binding:
+                parts.append(eng.binding.scope.value)
+            if eng.stats.active_requests:
+                parts.append(f"{eng.stats.active_requests} active")
+            if eng.stats.ttft_ms is not None:
+                parts.append(f"ttft {eng.stats.ttft_ms:.0f}ms")
+            text = Text(" · ".join(parts))
+            if eng.error:
+                text.append(f"  ! {eng.error}", style="yellow")
+            bar.update_detail(text)
+            return
+
+        if active == "tab-catalog":
+            key = _row_key(self.query_one("#catalog", DataTable))
+            if key is None:
+                bar.update_detail(Text("no model selected — / to filter", style="dim"))
+                return
+            kind, _, model_id = key.partition(":")
+            for eng in snap.engines:
+                if eng.kind.value != kind:
+                    continue
+                for model in eng.models:
+                    if model.id != model_id:
+                        continue
+                    bits = [model.name, eng.name]
+                    if model.family:
+                        bits.append(model.family)
+                    if model.format:
+                        bits.append(model.format)
+                    if model.max_context:
+                        bits.append(f"ctx {model.max_context}")
+                    if model.modified_at:
+                        bits.append(f"updated {_age_label(model.modified_at)}")
+                    bar.update_detail(Text(" · ".join(bits)))
+                    return
+            bar.update_detail(Text(model_id, style="dim"))
+            return
+
+        # Loaded
+        key = _row_key(self.query_one("#loaded", DataTable))
+        if key is None:
+            bar.update_detail(Text("nothing resident", style="dim"))
+            return
+        kind, _, model_id = key.partition(":")
+        for model in snap.all_loaded:
+            if model.engine.value == kind and model.id == model_id:
+                bits = [model.name, model.engine.value]
+                if model.family:
+                    bits.append(model.family)
+                if model.vram_bytes is not None:
+                    bits.append(f"vram {bytes_human(model.vram_bytes)}")
+                if model.context_fill is not None:
+                    bits.append(f"ctx {model.context_fill:.0%}")
+                bar.update_detail(Text(" · ".join(bits)))
+                return
+        bar.update_detail(Text(model_id, style="dim"))
+
+    def _log_new_errors(self, snap: SystemSnapshot) -> None:
+        log = self.query_one("#log", RichLog)
+        for eng in snap.engines:
+            if not eng.error:
+                continue
+            marker = f"{eng.kind.value}:{eng.error}"
+            if marker in self._logged_errors:
+                continue
+            self._logged_errors.add(marker)
+            log.write(f"[yellow]! {eng.name}: {eng.error}[/]")
+        for note in snap.hardware.degraded:
+            marker = f"hw:{note}"
+            if marker in self._logged_errors:
+                continue
+            self._logged_errors.add(marker)
+            log.write(f"[dim]! hardware: {note}[/]")
+
+    # -- actions ------------------------------------------------------------ #
+
+    def action_help(self) -> None:
+        self.push_screen(HelpScreen())
+
+    def action_toggle_pause(self) -> None:
+        self.paused = not self.paused
+        if not self.paused and self._pending is not None:
+            self.snapshot = self._pending
+            self._render_snapshot(self._pending)
+            self._pending = None
+            self.query_one("#log", RichLog).write("[dim]resumed[/]")
+        elif self.paused:
+            self.query_one("#log", RichLog).write("[yellow]paused — space to resume[/]")
+            if self.snapshot is not None:
+                self._render_status(self.snapshot)
+                host = self.snapshot.hardware.host.hostname
+                self.sub_title = f"{host} · PAUSED · {_age_label(self.snapshot.collected_at)}"
+
+    def action_toggle_offline(self) -> None:
+        self.show_offline = not self.show_offline
+        state = "all endpoints" if self.show_offline else "online only"
+        self.query_one("#log", RichLog).write(f"[dim]filter: {state}[/]")
+        if self.snapshot is not None:
+            self._render_snapshot(self.snapshot)
+
+    def action_filter_catalog(self) -> None:
+        self.run_worker(self._filter_catalog(), exclusive=True)
+
+    async def _filter_catalog(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-catalog"
+        result = await self.push_screen_wait(FilterScreen(self.catalog_filter))
+        if result is None:
+            return
+        self.catalog_filter = result
+        msg = f"filter: /{result}" if result else "filter cleared"
+        self.query_one("#log", RichLog).write(f"[dim]{msg}[/]")
+        if self.snapshot is not None:
+            self._render_catalog(self.snapshot)
+            self._render_status(self.snapshot)
+            filt = f" · /{self.catalog_filter}" if self.catalog_filter else ""
+            host = self.snapshot.hardware.host.hostname
+            online = len(self.snapshot.online_engines)
+            pause = " · PAUSED" if self.paused else ""
+            self.sub_title = (
+                f"{host} · {online} online · "
+                f"{self.snapshot.duration_ms or 0:.0f} ms{pause}{filt}"
+            )
+        self.query_one("#catalog", DataTable).focus()
+
+    def action_clear_filter(self) -> None:
+        if not self.catalog_filter:
+            return
+        self.catalog_filter = ""
+        self.query_one("#log", RichLog).write("[dim]filter cleared[/]")
+        if self.snapshot is not None:
+            self._render_catalog(self.snapshot)
+            self._render_status(self.snapshot)
+
+    def action_cycle_sort(self) -> None:
+        idx = _SORT_MODES.index(self.catalog_sort)
+        self.catalog_sort = _SORT_MODES[(idx + 1) % len(_SORT_MODES)]
+        self.query_one("#log", RichLog).write(f"[dim]catalog sort: {self.catalog_sort}[/]")
+        self.query_one("#tabs", TabbedContent).active = "tab-catalog"
+        if self.snapshot is not None:
+            self._render_catalog(self.snapshot)
+            self._render_status(self.snapshot)
+        self.query_one("#catalog", DataTable).focus()
+
+    def action_tab_engines(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-engines"
+        self.query_one("#engines", DataTable).focus()
+        self._render_detail()
+
+    def action_tab_catalog(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-catalog"
+        self.query_one("#catalog", DataTable).focus()
+        self._render_detail()
+
+    def action_tab_loaded(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-loaded"
+        self.query_one("#loaded", DataTable).focus()
+        self._render_detail()
 
     def action_refresh(self) -> None:
         self.run_worker(self._force_refresh(), exclusive=True)
@@ -290,29 +835,43 @@ class AiTopApp(App[None]):
     async def _force_refresh(self) -> None:
         snap = await self.collector.collect()
         self.bus.publish(Topic.SNAPSHOT, snap, source=self.collector.node)
+        if not self.paused:
+            self.snapshot = snap
+            self._render_snapshot(snap)
         self.query_one("#log", RichLog).write("[dim]refreshed[/]")
 
     def action_unload(self) -> None:
         self.run_worker(self._unload_selected(), exclusive=True)
 
     def action_load(self) -> None:
-        self.run_worker(self._load_prompt(), exclusive=True)
+        self.run_worker(self._load_with_picker(), exclusive=True)
+
+    def action_delete_model(self) -> None:
+        self.run_worker(self._delete_selected(), exclusive=True)
 
     def action_start_engine(self) -> None:
         self.run_worker(self._lifecycle_selected("start"), exclusive=True)
 
     def action_stop_engine(self) -> None:
-        self.run_worker(self._lifecycle_selected("stop"), exclusive=True)
+        self.run_worker(self._lifecycle_selected("stop", confirm=True), exclusive=True)
+
+    def action_restart_engine(self) -> None:
+        self.run_worker(self._lifecycle_selected("restart", confirm=True), exclusive=True)
+
+    async def _confirm(self, title: str, body: str) -> bool:
+        return bool(await self.push_screen_wait(ConfirmScreen(title, body)))
 
     async def _unload_selected(self) -> None:
         table = self.query_one("#loaded", DataTable)
-        if table.row_count == 0:
-            self.query_one("#log", RichLog).write("[yellow]no resident models to unload[/]")
+        key = _row_key(table)
+        if key is None:
+            self.query_one("#tabs", TabbedContent).active = "tab-loaded"
+            table = self.query_one("#loaded", DataTable)
+            table.focus()
+            key = _row_key(table)
+        if key is None:
+            self.query_one("#log", RichLog).write("[yellow]select a resident model first[/]")
             return
-        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        if row_key is None or row_key.value is None:
-            return
-        key = str(row_key.value)
         engine_kind, _, model_id = key.partition(":")
         target = self._engine_by_kind(engine_kind)
         if target is None:
@@ -320,16 +879,40 @@ class AiTopApp(App[None]):
         if not target.supports("unload"):
             self.query_one("#log", RichLog).write(f"[yellow]{target.name} cannot unload[/]")
             return
+        if not await self._confirm(
+            "Unload model?", f"Evict [bold]{model_id}[/] from {target.name}"
+        ):
+            self.query_one("#loaded", DataTable).focus()
+            return
         self.query_one("#log", RichLog).write(f"[cyan]unloading {model_id}…[/]")
         ok, message = await target.unload(model_id)
         self._log_result(ok, message, source=target.name)
         await self._force_refresh()
+        self.query_one("#loaded", DataTable).focus()
 
-    async def _load_prompt(self) -> None:
-        """Load the first non-resident model on the focused engine, if any."""
+    async def _load_with_picker(self) -> None:
         engine = self._selected_engine()
+        tabs = self.query_one("#tabs", TabbedContent)
+        if tabs.active == "tab-catalog":
+            key = _row_key(self.query_one("#catalog", DataTable))
+            if key is not None:
+                engine_kind, _, model_id = key.partition(":")
+                target = self._engine_by_kind(engine_kind)
+                if target is not None and target.supports("load"):
+                    if not await self._confirm(
+                        "Load model?", f"Warm [bold]{model_id}[/] into {target.name}"
+                    ):
+                        self.query_one("#catalog", DataTable).focus()
+                        return
+                    self.query_one("#log", RichLog).write(f"[cyan]loading {model_id}…[/]")
+                    ok, message = await target.load(model_id)
+                    self._log_result(ok, message, source=target.name)
+                    await self._force_refresh()
+                    self.query_one("#catalog", DataTable).focus()
+                    return
+
         if engine is None:
-            self.query_one("#log", RichLog).write("[yellow]select an engine row first[/]")
+            self.query_one("#log", RichLog).write("[yellow]select an engine (pane 1) first[/]")
             return
         if not engine.supports("load"):
             self.query_one("#log", RichLog).write(f"[yellow]{engine.name} cannot load[/]")
@@ -342,16 +925,57 @@ class AiTopApp(App[None]):
             self.query_one("#log", RichLog).write("[yellow]no models available to load[/]")
             return
         loaded_ids = {m.id for m in eng_snap.loaded}
-        candidate = next((m for m in eng_snap.models if m.id not in loaded_ids), None)
-        if candidate is None:
+        options = [
+            (
+                m.id,
+                f"{m.name}  {m.parameter_size or ''}  {m.quantization or ''}  "
+                f"{bytes_human(m.size_bytes)}",
+            )
+            for m in eng_snap.models
+            if m.id not in loaded_ids
+        ]
+        if not options:
             self.query_one("#log", RichLog).write("[dim]all known models already resident[/]")
             return
-        self.query_one("#log", RichLog).write(f"[cyan]loading {candidate.id}…[/]")
-        ok, message = await engine.load(candidate.id)
+        chosen = await self.push_screen_wait(ModelPickerScreen(engine.name, options))
+        if not chosen:
+            self.query_one("#engines", DataTable).focus()
+            return
+        self.query_one("#log", RichLog).write(f"[cyan]loading {chosen}…[/]")
+        ok, message = await engine.load(chosen)
         self._log_result(ok, message, source=engine.name)
         await self._force_refresh()
+        self.query_one("#engines", DataTable).focus()
 
-    async def _lifecycle_selected(self, action: str) -> None:
+    async def _delete_selected(self) -> None:
+        tabs = self.query_one("#tabs", TabbedContent)
+        tabs.active = "tab-catalog"
+        table = self.query_one("#catalog", DataTable)
+        table.focus()
+        key = _row_key(table)
+        if key is None:
+            self.query_one("#log", RichLog).write("[yellow]select a catalog model first[/]")
+            return
+        engine_kind, _, model_id = key.partition(":")
+        target = self._engine_by_kind(engine_kind)
+        if target is None:
+            return
+        if not target.supports("delete"):
+            self.query_one("#log", RichLog).write(f"[yellow]{target.name} cannot delete[/]")
+            return
+        if not await self._confirm(
+            "Delete model from disk?",
+            f"Permanently remove [bold]{model_id}[/] from {target.name}",
+        ):
+            table.focus()
+            return
+        self.query_one("#log", RichLog).write(f"[cyan]deleting {model_id}…[/]")
+        ok, message = await target.delete(model_id)
+        self._log_result(ok, message, source=target.name)
+        await self._force_refresh()
+        table.focus()
+
+    async def _lifecycle_selected(self, action: str, *, confirm: bool = False) -> None:
         engine = self._selected_engine()
         if engine is None:
             self.query_one("#log", RichLog).write("[yellow]select an engine row first[/]")
@@ -361,19 +985,33 @@ class AiTopApp(App[None]):
                 f"[yellow]{engine.name} has no lifecycle control[/]"
             )
             return
+        if confirm and not await self._confirm(
+            f"{action.title()} engine?", f"{action.title()} [bold]{engine.name}[/]"
+        ):
+            self.query_one("#engines", DataTable).focus()
+            return
         self.query_one("#log", RichLog).write(f"[cyan]{action} {engine.name}…[/]")
         ok, message = await getattr(engine, action)()
         self._log_result(ok, message, source=engine.name)
         await self._force_refresh()
+        self.query_one("#engines", DataTable).focus()
 
     def _selected_engine(self):
-        table = self.query_one("#engines", DataTable)
-        if table.row_count == 0:
-            return None
-        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        if row_key is None or row_key.value is None:
-            return None
-        return self._engine_by_kind(str(row_key.value))
+        tabs = self.query_one("#tabs", TabbedContent)
+        if tabs.active == "tab-engines":
+            key = _row_key(self.query_one("#engines", DataTable))
+            if key is not None:
+                kind = key.split("|", 1)[0]
+                return self._engine_by_kind(kind)
+        for table_id in ("catalog", "loaded"):
+            key = _row_key(self.query_one(f"#{table_id}", DataTable))
+            if key is not None:
+                kind = key.split(":", 1)[0]
+                return self._engine_by_kind(kind)
+        key = _row_key(self.query_one("#engines", DataTable))
+        if key is not None:
+            return self._engine_by_kind(key.split("|", 1)[0])
+        return None
 
     def _engine_by_kind(self, kind: str):
         engines = self.collector.engines.engines
@@ -391,11 +1029,6 @@ class AiTopApp(App[None]):
         if self.snapshot is None:
             return
         self.query_one("#log", RichLog).write(self.snapshot.model_dump_json()[:500] + "…")
-
-    def action_help(self) -> None:
-        self.query_one("#log", RichLog).write(
-            "[bold]keys[/]  q quit · r refresh · u unload · l load · s start · x stop · j json"
-        )
 
 
 def run_tui(
