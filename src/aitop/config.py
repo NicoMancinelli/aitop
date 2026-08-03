@@ -108,6 +108,27 @@ class UpdateConfig(BaseModel):
         return max(0.0, self.interval_hours) * 3600
 
 
+class FleetNodeConfig(BaseModel):
+    """A peer `aitop serve` instance to fold into fleet views."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    url: str
+    enabled: bool = True
+    timeout: float = 3.0
+
+
+class FleetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    nodes: list[FleetNodeConfig] = Field(default_factory=list)
+    """Remote aitop gateways; their snapshots are merged under `node` names."""
+
+    serve_host: str = "127.0.0.1"
+    serve_port: int = 9090
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -115,6 +136,7 @@ class Config(BaseModel):
     polling: PollingConfig = Field(default_factory=PollingConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     updates: UpdateConfig = Field(default_factory=UpdateConfig)
+    fleet: FleetConfig = Field(default_factory=FleetConfig)
     endpoints: list[EndpointConfig] = Field(default_factory=list)
     """Extra endpoints, merged with auto-discovered ones."""
 

@@ -26,13 +26,18 @@ from aitop.config import Config, EndpointConfig
 from aitop.engines.base import BaseEngine
 from aitop.engines.lmstudio import LMStudioEngine
 from aitop.engines.ollama import OllamaEngine
+from aitop.engines.openai_compat import LlamaServerEngine, MLXEngine, VLLMEngine
 from aitop.models import EngineKind, EngineSnapshot
+from aitop.version import __version__
 
 log = logging.getLogger(__name__)
 
 ADAPTERS: dict[EngineKind, type[BaseEngine]] = {
     EngineKind.OLLAMA: OllamaEngine,
     EngineKind.LMSTUDIO: LMStudioEngine,
+    EngineKind.VLLM: VLLMEngine,
+    EngineKind.LLAMA_SERVER: LlamaServerEngine,
+    EngineKind.MLX: MLXEngine,
 }
 
 
@@ -45,7 +50,7 @@ class EngineRegistry:
         self.config = config or Config()
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(4.0, connect=1.0),
-            headers={"User-Agent": "aitop/0.1"},
+            headers={"User-Agent": f"aitop/{__version__}"},
             trust_env=False,
             limits=httpx.Limits(max_connections=16),
         )

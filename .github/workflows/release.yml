@@ -35,7 +35,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           if [ "$TAG" != "v$VERSION" ]; then
             echo "::error::tag $TAG does not match aitop.__version__ ($VERSION)."
-            echo "::error::Bump __version__ in src/aitop/__init__.py, or retag as v$VERSION."
+            echo "::error::Bump __version__ in src/aitop/version.py, or retag as v$VERSION."
             exit 1
           fi
           echo "✓ $TAG matches aitop $VERSION"

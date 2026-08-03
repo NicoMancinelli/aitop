@@ -1,13 +1,15 @@
 """aitop command-line entry point.
 
-    aitop              # one-shot AI neofetch dashboard (default)
-    aitop --watch      # refresh it in place until Ctrl-C
-    aitop --json       # the raw SystemSnapshot
-    aitop update       # check for and install a newer release
-    aitop doctor       # what aitop can and cannot see on this machine
-
-`--json` emits the same payload the future web UI, Prometheus exporter and
-fleet stream will consume.
+aitop                  # one-shot AI neofetch dashboard (default)
+aitop --watch          # refresh it in place until Ctrl-C
+aitop tui              # btop-style live Textual dashboard
+aitop --json | jq .    # the raw SystemSnapshot
+aitop start|stop|…     # lifecycle control
+aitop pull MODEL       # pull a model into Ollama
+aitop models search q  # search the Hugging Face hub
+aitop serve            # expose /api/snapshot for the fleet
+aitop update           # check for and install a newer release
+aitop doctor           # what aitop can and cannot see on this machine
 """
 
 from __future__ import annotations
@@ -20,11 +22,15 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.live import Live
+from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn
+from rich.table import Table
 
 from aitop import __version__
 from aitop.collector import SnapshotCollector
 from aitop.config import Config, config_path
-from aitop.models import SystemSnapshot
+from aitop.engines.registry import EngineRegistry
+from aitop.hub import search_hub
+from aitop.models import DownloadProgress, EngineKind, SystemSnapshot
 from aitop.selfupdate import (
     REPO_URL,
     UpdateStatus,
@@ -33,6 +39,7 @@ from aitop.selfupdate import (
     detect_install_method,
     update_command,
 )
+from aitop.serve import SnapshotServer, fleet_nodes_from_config, merge_fleet
 from aitop.views.neofetch import render_neofetch
 
 log = logging.getLogger("aitop")
@@ -47,7 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  aitop                  one-shot dashboard\n"
             "  aitop --watch          refresh every 2s\n"
+            "  aitop tui              live btop-style TUI\n"
             "  aitop --json | jq .    machine-readable snapshot\n"
+            "  aitop unload ollama    evict resident Ollama weights\n"
+            "  aitop pull llama3.2    pull a model into Ollama\n"
+            "  aitop serve            expose this node to the fleet\n"
             "  aitop update           upgrade to the latest release\n"
             "  aitop doctor           show what telemetry is available here\n"
         ),
@@ -85,6 +96,103 @@ def build_parser() -> argparse.ArgumentParser:
         help="report install method, config, and telemetry availability",
     )
     _add_common(doctor)
+
+    tui = subparsers.add_parser("tui", help="btop-style live Textual dashboard")
+    _add_common(tui)
+    tui.add_argument(
+        "--interval",
+        "-i",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="refresh interval (default: from config)",
+    )
+    tui.add_argument(
+        "--no-privileged",
+        action="store_true",
+        help="never invoke sudo helpers such as powermetrics",
+    )
+
+    serve = subparsers.add_parser(
+        "serve",
+        help="expose /api/snapshot and /api/stream for the fleet",
+    )
+    _add_common(serve)
+    serve.add_argument("--host", default=None, help="bind address (default: from config)")
+    serve.add_argument("--port", "-p", type=int, default=None, help="bind port (default: 9090)")
+    serve.add_argument(
+        "--interval",
+        "-i",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="snapshot refresh interval",
+    )
+    serve.add_argument(
+        "--no-privileged",
+        action="store_true",
+        help="never invoke sudo helpers such as powermetrics",
+    )
+
+    fleet = subparsers.add_parser(
+        "fleet",
+        help="show local + remote fleet snapshots",
+    )
+    _add_common(fleet)
+    fleet.add_argument("--json", action="store_true", help="emit JSON array of snapshots")
+    fleet.add_argument(
+        "--no-privileged",
+        action="store_true",
+        help="never invoke sudo helpers such as powermetrics",
+    )
+
+    for action in ("start", "stop", "restart"):
+        sp = subparsers.add_parser(action, help=f"{action} a local AI runtime")
+        _add_common(sp)
+        sp.add_argument(
+            "engine",
+            help="runtime kind: ollama, lmstudio, vllm, llama-server, mlx",
+        )
+        sp.add_argument(
+            "--host",
+            default=None,
+            help="optional host:port override when selecting the endpoint",
+        )
+
+    unload = subparsers.add_parser("unload", help="evict resident model weights")
+    _add_common(unload)
+    unload.add_argument("engine", help="runtime kind or endpoint name")
+    unload.add_argument("model", nargs="?", default=None, help="model id (default: all)")
+
+    rebind = subparsers.add_parser(
+        "rebind",
+        help="rebind an engine to a new host (e.g. Tailscale IP)",
+    )
+    _add_common(rebind)
+    rebind.add_argument("engine", help="runtime kind (currently: ollama)")
+    rebind.add_argument("host", help="new bind address, e.g. 0.0.0.0 or 100.x.y.z")
+
+    pull = subparsers.add_parser("pull", help="pull a model into a local engine")
+    _add_common(pull)
+    pull.add_argument("model", help="model name, e.g. llama3.2:3b")
+    pull.add_argument(
+        "--engine",
+        default="ollama",
+        help="runtime to pull into (default: ollama)",
+    )
+
+    models = subparsers.add_parser("models", help="model hub helpers")
+    _add_common(models)
+    models_sub = models.add_subparsers(dest="models_command", required=True)
+    search = models_sub.add_parser("search", help="search the Hugging Face hub")
+    _add_common(search)
+    search.add_argument("query", help="search string")
+    search.add_argument("--limit", type=int, default=15, help="max results (default: 15)")
+    search.add_argument(
+        "--tag",
+        default="gguf",
+        help="HF filter tag (default: gguf; pass '' for none)",
+    )
 
     return parser
 
@@ -156,6 +264,22 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_run_update(args, config, console))
             case "doctor":
                 return asyncio.run(_run_doctor(args, config, console))
+            case "tui":
+                return _run_tui(args, config)
+            case "serve":
+                return asyncio.run(_run_serve(args, config, console))
+            case "fleet":
+                return asyncio.run(_run_fleet(args, config, console))
+            case "start" | "stop" | "restart":
+                return asyncio.run(_run_lifecycle(args, config, console))
+            case "unload":
+                return asyncio.run(_run_unload(args, config, console))
+            case "rebind":
+                return asyncio.run(_run_rebind(args, config, console))
+            case "pull":
+                return asyncio.run(_run_pull(args, config, console))
+            case "models":
+                return asyncio.run(_run_models(args, config, console))
             case _:
                 return asyncio.run(_run_dashboard(args, config, console))
     except KeyboardInterrupt:
@@ -255,6 +379,240 @@ async def _auto_apply(console: Console) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# TUI / serve / fleet
+# --------------------------------------------------------------------------- #
+
+
+def _run_tui(args: argparse.Namespace, config: Config) -> int:
+    from aitop.views.tui import run_tui
+
+    return run_tui(
+        config,
+        allow_privileged=not args.no_privileged,
+        interval=args.interval,
+    )
+
+
+async def _run_serve(args: argparse.Namespace, config: Config, console: Console) -> int:
+    host = args.host or config.fleet.serve_host
+    port = args.port or config.fleet.serve_port
+    collector = SnapshotCollector(config, allow_privileged=not args.no_privileged)
+    server = SnapshotServer(
+        collector,
+        host=host,
+        port=port,
+        interval=args.interval,
+    )
+    console.print(f"[bold]aitop serve[/] http://{host}:{port}")
+    console.print("[dim]/healthz  /api/snapshot  /api/stream[/]")
+    try:
+        await server.run()
+    finally:
+        await collector.aclose()
+    return 0
+
+
+async def _run_fleet(args: argparse.Namespace, config: Config, console: Console) -> int:
+    collector = SnapshotCollector(config, allow_privileged=not args.no_privileged)
+    try:
+        local = await collector.collect()
+        snapshots = await merge_fleet(local, fleet_nodes_from_config(config))
+        if args.json:
+            import json
+
+            print(json.dumps([s.model_dump(mode="json") for s in snapshots], indent=2))
+            return 0
+
+        for snap in snapshots:
+            console.print(f"[bold cyan]▸ node[/] {snap.node}")
+            console.print(
+                render_neofetch(snap, show_logo=False, color=not args.no_color, show_offline=False)
+            )
+            console.print()
+        if len(snapshots) == 1 and not config.fleet.nodes:
+            console.print(
+                "[dim]No fleet.nodes configured. Add peers under fleet.nodes in "
+                f"{config_path()}, or point another host's aitop serve here.[/]"
+            )
+        return 0
+    finally:
+        await collector.aclose()
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle
+# --------------------------------------------------------------------------- #
+
+
+async def _resolve_engine(config: Config, kind_or_name: str, host: str | None = None):
+    from aitop.config import EndpointConfig
+    from aitop.engines.registry import ADAPTERS
+    from aitop.utils.parse import split_host_port
+
+    registry = EngineRegistry(config)
+    engines = registry.build()
+    needle = kind_or_name.lower()
+    matches = [
+        e
+        for e in engines
+        if e.kind.value == needle or e.name.lower() == needle or e.display_name.lower() == needle
+    ]
+    if host:
+        matches = [e for e in matches if e.host == host or f"{e.host}:{e.port}" == host]
+    if matches:
+        return matches[0], registry, None
+
+    try:
+        kind = EngineKind(needle)
+    except ValueError:
+        await registry.aclose()
+        return None, registry, f"unknown engine {kind_or_name!r}"
+
+    adapter_cls = ADAPTERS.get(kind)
+    if adapter_cls is None:
+        await registry.aclose()
+        return None, registry, f"no adapter for {kind.value}"
+
+    if host:
+        h, p = split_host_port(host, EndpointConfig(kind=kind).resolved_port())
+        ep = EndpointConfig(kind=kind, host=h, port=p)
+    else:
+        ep = EndpointConfig(kind=kind)
+
+    engine = adapter_cls(ep, client=registry._client)
+    return engine, registry, None
+
+
+async def _run_lifecycle(args: argparse.Namespace, config: Config, console: Console) -> int:
+    engine, registry, err = await _resolve_engine(config, args.engine, getattr(args, "host", None))
+    try:
+        if err or engine is None:
+            console.print(f"[yellow]{err}")
+            return 1
+        action = args.command
+        console.print(f"[cyan]{action} {engine.name}…")
+        ok, message = await getattr(engine, action)()
+        console.print(f"[{'green' if ok else 'yellow'}]{message}")
+        return 0 if ok else 1
+    finally:
+        await registry.aclose()
+
+
+async def _run_unload(args: argparse.Namespace, config: Config, console: Console) -> int:
+    engine, registry, err = await _resolve_engine(config, args.engine)
+    try:
+        if err or engine is None:
+            console.print(f"[yellow]{err}")
+            return 1
+        if not engine.supports("unload"):
+            console.print(f"[yellow]{engine.name} does not support unload")
+            return 1
+        ok, message = await engine.unload(args.model)
+        console.print(f"[{'green' if ok else 'yellow'}]{message}")
+        return 0 if ok else 1
+    finally:
+        await registry.aclose()
+
+
+async def _run_rebind(args: argparse.Namespace, config: Config, console: Console) -> int:
+    engine, registry, err = await _resolve_engine(config, args.engine)
+    try:
+        if err or engine is None:
+            console.print(f"[yellow]{err}")
+            return 1
+        if not engine.supports("rebind"):
+            console.print(f"[yellow]{engine.name} does not support rebind")
+            return 1
+        # Offer Tailscale IP as a hint when the user asked for "tailscale".
+        host = args.host
+        if host.lower() in {"tailscale", "tailnet", "ts"}:
+            from aitop.net.tailscale import collect_tailscale
+
+            ts = await collect_tailscale()
+            if not ts.ipv4:
+                console.print("[yellow]no Tailscale IPv4 available on this node")
+                return 1
+            host = ts.ipv4
+            console.print(f"[dim]using Tailscale IP {host}[/]")
+        ok, message = await engine.rebind(host)
+        console.print(f"[{'green' if ok else 'yellow'}]{message}")
+        return 0 if ok else 1
+    finally:
+        await registry.aclose()
+
+
+async def _run_pull(args: argparse.Namespace, config: Config, console: Console) -> int:
+    engine, registry, err = await _resolve_engine(config, args.engine)
+    try:
+        if err or engine is None:
+            console.print(f"[yellow]{err}")
+            return 1
+        if not engine.supports("pull"):
+            console.print(f"[yellow]{engine.name} does not support pull")
+            return 1
+
+        progress = Progress(
+            TextColumn("[bold cyan]{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            console=console,
+            transient=True,
+        )
+        task_id = None
+
+        def on_progress(tick: DownloadProgress) -> None:
+            nonlocal task_id
+            total = tick.total_bytes or 0
+            completed = tick.completed_bytes or 0
+            if task_id is None:
+                task_id = progress.add_task(tick.status or args.model, total=total or None)
+            progress.update(
+                task_id,
+                description=tick.status or args.model,
+                completed=completed,
+                total=total or None,
+            )
+
+        with progress:
+            ok, message = await engine.pull(args.model, on_progress=on_progress)
+        console.print(f"[{'green' if ok else 'yellow'}]{message}")
+        return 0 if ok else 1
+    finally:
+        await registry.aclose()
+
+
+async def _run_models(args: argparse.Namespace, config: Config, console: Console) -> int:
+    if args.models_command != "search":
+        console.print("[yellow]unknown models subcommand")
+        return 1
+    tag = args.tag or None
+    results = await search_hub(args.query, limit=args.limit, filter_tag=tag)
+    if not results:
+        console.print("[yellow]no results (or hub unreachable)")
+        return 1
+
+    table = Table(box=None, pad_edge=False, padding=(0, 2))
+    table.add_column("MODEL", style="bold")
+    table.add_column("DOWNLOADS", justify="right")
+    table.add_column("LIKES", justify="right")
+    table.add_column("TAGS")
+    for model in results:
+        tags = ", ".join(model.tags[:4])
+        table.add_row(
+            model.id,
+            f"{model.downloads:,}" if model.downloads is not None else "—",
+            f"{model.likes:,}" if model.likes is not None else "—",
+            tags,
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]Pull into Ollama when a matching library tag exists:[/] "
+        f"aitop pull {results[0].id.split('/')[-1]}"
+    )
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # aitop update
 # --------------------------------------------------------------------------- #
 
@@ -312,8 +670,6 @@ def _print_manual_instructions(console: Console, method) -> None:
 
 
 async def _run_doctor(args: argparse.Namespace, config: Config, console: Console) -> int:
-    from rich.table import Table
-
     from aitop.hardware.collector import HardwareCollector
     from aitop.selfupdate import cache_path, repo_checkout
 
@@ -331,6 +687,10 @@ async def _run_doctor(args: argparse.Namespace, config: Config, console: Console
     table.add_row("config", str(args.config or config_path()))
     table.add_row("config loaded", "yes" if config.source else "no — using defaults")
     table.add_row("update cache", str(cache_path()))
+    table.add_row(
+        "fleet nodes",
+        ", ".join(n.name for n in config.fleet.nodes) or "none",
+    )
 
     collector = HardwareCollector(allow_privileged=True)
     probes = await collector.probes()
@@ -343,6 +703,10 @@ async def _run_doctor(args: argparse.Namespace, config: Config, console: Console
     table.add_row(
         "endpoints probed",
         ", ".join(f"{e.kind.value}@{e.host}:{e.resolved_port()}" for e in endpoints),
+    )
+    table.add_row(
+        "adapters",
+        ", ".join(k.value for k in EngineRegistry.supported),
     )
 
     console.print(table)

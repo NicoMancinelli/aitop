@@ -18,6 +18,7 @@ import json
 from typing import Any, ClassVar
 
 from aitop.engines.base import BaseEngine, EngineCapability
+from aitop.engines.lifecycle import restart_engine, start_engine, stop_engine
 from aitop.models import EngineKind, EngineSnapshot, EngineState, LoadedModel, ModelInfo
 from aitop.utils.parse import first, to_int
 from aitop.utils.proc import run, which
@@ -34,6 +35,7 @@ class LMStudioEngine(BaseEngine):
             EngineCapability.LIST_MODELS,
             EngineCapability.LIST_LOADED,
             EngineCapability.UNLOAD,
+            EngineCapability.LIFECYCLE,
         }
     )
     process_names: ClassVar[tuple[str, ...]] = ("LM Studio", "lms", "lmstudio")
@@ -164,6 +166,32 @@ class LMStudioEngine(BaseEngine):
         if result.ok:
             return True, f"unloaded {model_id or 'all models'}"
         return False, result.reason
+
+    async def start(self) -> tuple[bool, str]:
+        if self.endpoint.remote:
+            return False, "cannot start a remote engine"
+        result = await start_engine("lmstudio", host=self.host, port=self.port)
+        return result.ok, result.message
+
+    async def stop(self) -> tuple[bool, str]:
+        if self.endpoint.remote:
+            return False, "cannot stop a remote engine"
+        snap = await self.poll()
+        result = await stop_engine("lmstudio", pid=snap.pid, managed_by=snap.managed_by)
+        return result.ok, result.message
+
+    async def restart(self) -> tuple[bool, str]:
+        if self.endpoint.remote:
+            return False, "cannot restart a remote engine"
+        snap = await self.poll()
+        result = await restart_engine(
+            "lmstudio",
+            pid=snap.pid,
+            managed_by=snap.managed_by,
+            host=self.host,
+            port=self.port,
+        )
+        return result.ok, result.message
 
 
 def _data_array(payload: Any) -> list[dict[str, Any]]:

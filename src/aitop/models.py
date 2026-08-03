@@ -231,7 +231,7 @@ class LoadedModel(Frozen):
 
 
 class InferenceStats(Frozen):
-    """Live inference counters. Populated in Phase 4; zeroed until then."""
+    """Live inference counters. Populated from engine /metrics when available."""
 
     ttft_ms: float | None = None
     tokens_per_second: float | None = None
@@ -239,6 +239,37 @@ class InferenceStats(Frozen):
     queue_depth: int = 0
     active_requests: int = 0
     total_requests: int = 0
+
+
+class DownloadProgress(Frozen):
+    """One progress tick from a model pull / HF download."""
+
+    model: str
+    engine: EngineKind = EngineKind.UNKNOWN
+    status: str = "pending"
+    completed_bytes: int | None = None
+    total_bytes: int | None = None
+    error: str | None = None
+    done: bool = False
+
+    @property
+    def fraction(self) -> float | None:
+        if not self.total_bytes or self.completed_bytes is None:
+            return None
+        return self.completed_bytes / self.total_bytes
+
+
+class HubModel(Frozen):
+    """A model discovered via the Hugging Face hub search."""
+
+    id: str
+    author: str | None = None
+    downloads: int | None = None
+    likes: int | None = None
+    tags: list[str] = Field(default_factory=list)
+    pipeline_tag: str | None = None
+    last_modified: datetime | None = None
+    url: str | None = None
 
 
 class EngineSnapshot(Frozen):

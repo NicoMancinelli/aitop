@@ -13,10 +13,19 @@ panel visualises.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Callable
 from typing import Any, ClassVar
 
 from aitop.engines.base import BaseEngine, EngineCapability
-from aitop.models import EngineKind, EngineSnapshot, EngineState, LoadedModel, ModelInfo
+from aitop.engines.lifecycle import restart_engine, start_engine, stop_engine
+from aitop.models import (
+    DownloadProgress,
+    EngineKind,
+    EngineSnapshot,
+    EngineState,
+    LoadedModel,
+    ModelInfo,
+)
 from aitop.utils.parse import first, parse_timestamp, to_int
 
 
@@ -30,6 +39,8 @@ class OllamaEngine(BaseEngine):
             EngineCapability.LIST_LOADED,
             EngineCapability.UNLOAD,
             EngineCapability.PULL,
+            EngineCapability.LIFECYCLE,
+            EngineCapability.REBIND,
         }
     )
     process_names: ClassVar[tuple[str, ...]] = ("ollama",)
@@ -124,6 +135,129 @@ class OllamaEngine(BaseEngine):
         if failed:
             return False, "failed to unload: " + ", ".join(failed)
         return True, f"unloaded {len(targets)} model(s)"
+
+    async def start(self) -> tuple[bool, str]:
+        if self.endpoint.remote:
+            return False, "cannot start a remote engine"
+        result = await start_engine("ollama", host=self.host, port=self.port)
+        return result.ok, result.message
+
+    async def stop(self) -> tuple[bool, str]:
+        if self.endpoint.remote:
+            return False, "cannot stop a remote engine"
+        snap = await self.poll()
+        result = await stop_engine("ollama", pid=snap.pid, managed_by=snap.managed_by)
+        return result.ok, result.message
+
+    async def restart(self) -> tuple[bool, str]:
+        if self.endpoint.remote:
+            return False, "cannot restart a remote engine"
+        snap = await self.poll()
+        result = await restart_engine(
+            "ollama",
+            pid=snap.pid,
+            managed_by=snap.managed_by,
+            host=self.host,
+            port=self.port,
+        )
+        return result.ok, result.message
+
+    async def rebind(self, host: str) -> tuple[bool, str]:
+        """Restart Ollama bound to a new host (e.g. Tailscale IP or 0.0.0.0)."""
+        if self.endpoint.remote:
+            return False, "cannot rebind a remote engine"
+        from aitop.utils.parse import split_host_port
+
+        new_host, new_port = split_host_port(host, self.port)
+        snap = await self.poll()
+        stopped = await stop_engine("ollama", pid=snap.pid, managed_by=snap.managed_by)
+        if not stopped.ok and "already gone" not in stopped.message:
+            return False, f"rebind stop failed: {stopped.message}"
+
+        import asyncio
+
+        await asyncio.sleep(0.5)
+        started = await start_engine(
+            "ollama",
+            managed_by=snap.managed_by if snap.managed_by != "systemd" else "manual",
+            host=new_host,
+            port=new_port,
+        )
+        if not started.ok:
+            return False, (
+                f"stopped ollama but failed to restart on {new_host}:{new_port}: "
+                f"{started.message}. For systemd/launchd, set OLLAMA_HOST in the "
+                "unit/plist and restart the service."
+            )
+        self.endpoint.host = new_host
+        self.endpoint.port = new_port
+        return True, f"rebound Ollama to {new_host}:{new_port}"
+
+    async def pull(
+        self,
+        model: str,
+        *,
+        on_progress: Callable[[DownloadProgress], None] | None = None,
+    ) -> tuple[bool, str]:
+        """Stream `POST /api/pull` and optionally report progress."""
+        url = f"{self.base_url}/api/pull"
+        try:
+            async with self.client.stream(
+                "POST",
+                url,
+                json={"name": model, "stream": True},
+                timeout=None,
+            ) as response:
+                response.raise_for_status()
+                async for progress in self._iter_pull_progress(response, model):
+                    if on_progress:
+                        on_progress(progress)
+                    if progress.status == "error":
+                        return False, progress.error or "pull failed"
+                    if progress.done:
+                        return True, f"pulled {model}"
+        except Exception as exc:
+            return False, f"pull failed: {type(exc).__name__}: {exc}"
+        return True, f"pulled {model}"
+
+    async def _iter_pull_progress(self, response, model: str) -> AsyncIterator[DownloadProgress]:
+        import json
+
+        async for line in response.aiter_lines():
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            error = payload.get("error")
+            status = str(payload.get("status") or ("error" if error else "pulling"))
+            completed = to_int(payload.get("completed"))
+            total = to_int(payload.get("total"))
+            done = status.lower() in {"success", "complete", "completed"} or (
+                error is None and status == "success"
+            )
+            if error:
+                yield DownloadProgress(
+                    model=model,
+                    engine=self.kind,
+                    status="error",
+                    error=str(error),
+                    done=True,
+                )
+                return
+            yield DownloadProgress(
+                model=model,
+                engine=self.kind,
+                status=status,
+                completed_bytes=completed,
+                total_bytes=total,
+                done=done,
+            )
+            if done:
+                return
 
 
 def _models_array(payload: Any) -> list[dict[str, Any]]:

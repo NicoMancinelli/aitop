@@ -52,13 +52,21 @@ class SnapshotCollector:
             self.engines.poll_all(),
             collect_tailscale(),
         )
-        return SystemSnapshot(
+        snapshot = SystemSnapshot(
             node=self.node,
             hardware=hardware,
             engines=sorted(engines, key=lambda e: (not e.online, e.kind.value)),
             tailscale=tailscale,
             duration_ms=round((time.perf_counter() - started) * 1000, 1),
         )
+        return snapshot
+
+    async def collect_fleet(self) -> list[SystemSnapshot]:
+        """Local snapshot plus any configured remote fleet nodes."""
+        from aitop.serve import fleet_nodes_from_config, merge_fleet
+
+        local = await self.collect()
+        return await merge_fleet(local, fleet_nodes_from_config(self.config))
 
     async def stream(self, interval: float | None = None) -> None:
         """Collect forever, publishing each snapshot to the bus.
