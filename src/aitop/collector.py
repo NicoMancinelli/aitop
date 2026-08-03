@@ -6,8 +6,8 @@ same on an interval and publishes to the event bus.
 
 Renderers consume snapshots and nothing else — no renderer imports
 `aitop.hardware` or `aitop.engines`. That is what makes swapping the Textual UI
-for a web UI (or a Prometheus exporter, or a WebSocket fleet feed) a matter of
-adding a subscriber.
+for the embedded web dashboard (or a Prometheus exporter, or a WebSocket fleet
+feed) a matter of adding a subscriber.
 """
 
 from __future__ import annotations

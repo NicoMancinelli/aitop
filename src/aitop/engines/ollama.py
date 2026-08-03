@@ -42,6 +42,7 @@ class OllamaEngine(BaseEngine):
             EngineCapability.UNLOAD,
             EngineCapability.LOAD,
             EngineCapability.PULL,
+            EngineCapability.DELETE,
             EngineCapability.LIFECYCLE,
             EngineCapability.REBIND,
         }
@@ -151,6 +152,25 @@ class OllamaEngine(BaseEngine):
         except Exception as exc:
             return False, f"load failed: {type(exc).__name__}: {exc}"
         return True, f"loaded {model_id}"
+
+    async def delete(self, model_id: str) -> tuple[bool, str]:
+        """`DELETE /api/delete` removes a model from disk."""
+        try:
+            response = await self.client.request(
+                "DELETE",
+                f"{self.base_url}/api/delete",
+                json={"model": model_id},
+            )
+            # Older Ollamas used POST /api/delete.
+            if response.status_code == 404:
+                response = await self.client.post(
+                    f"{self.base_url}/api/delete",
+                    json={"name": model_id},
+                )
+            response.raise_for_status()
+        except Exception as exc:
+            return False, f"delete failed: {type(exc).__name__}: {exc}"
+        return True, f"deleted {model_id}"
 
     async def start(self) -> tuple[bool, str]:
         if self.endpoint.remote:

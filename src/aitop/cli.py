@@ -229,6 +229,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="gguf",
         help="HF filter tag (default: gguf; pass '' for none)",
     )
+    list_models = models_sub.add_parser("list", help="list models known to local engines")
+    _add_common(list_models)
+    list_models.add_argument(
+        "--engine",
+        default=None,
+        help="limit to one runtime kind (ollama, lmstudio, …)",
+    )
+    list_models.add_argument("--json", action="store_true", help="emit JSON")
+    list_models.add_argument(
+        "--loaded",
+        action="store_true",
+        help="only show models currently resident",
+    )
+
+    delete = subparsers.add_parser("delete", help="remove a model from disk")
+    _add_common(delete)
+    delete.add_argument("engine", help="runtime kind (currently: ollama)")
+    delete.add_argument("model", help="model id to delete")
 
     return parser
 
@@ -312,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_run_unload(args, config, console))
             case "load":
                 return asyncio.run(_run_load(args, config, console))
+            case "delete":
+                return asyncio.run(_run_delete(args, config, console))
             case "rebind":
                 return asyncio.run(_run_rebind(args, config, console))
             case "pull":
@@ -445,8 +465,8 @@ async def _run_serve(args: argparse.Namespace, config: Config, console: Console)
         port=port,
         interval=args.interval,
     )
-    console.print(f"[bold]aitop serve[/] http://{host}:{port}")
-    console.print("[dim]/healthz  /api/snapshot  /api/stream  /metrics[/]")
+    console.print(f"[bold]aitop serve[/] http://{host}:{port}/ui")
+    console.print("[dim]/ui  /healthz  /api/snapshot  /api/stream  /api/ws  /metrics[/]")
     try:
         await server.run()
     finally:
@@ -699,10 +719,33 @@ async def _run_pull(args: argparse.Namespace, config: Config, console: Console) 
         await registry.aclose()
 
 
+async def _run_delete(args: argparse.Namespace, config: Config, console: Console) -> int:
+    engine, registry, err = await _resolve_engine(config, args.engine)
+    try:
+        if err or engine is None:
+            console.print(f"[yellow]{err}")
+            return 1
+        if not engine.supports("delete"):
+            console.print(f"[yellow]{engine.name} does not support delete")
+            return 1
+        console.print(f"[cyan]deleting {args.model} from {engine.name}…")
+        ok, message = await engine.delete(args.model)
+        console.print(f"[{'green' if ok else 'yellow'}]{message}")
+        return 0 if ok else 1
+    finally:
+        await registry.aclose()
+
+
 async def _run_models(args: argparse.Namespace, config: Config, console: Console) -> int:
-    if args.models_command != "search":
-        console.print("[yellow]unknown models subcommand")
-        return 1
+    if args.models_command == "search":
+        return await _run_models_search(args, console)
+    if args.models_command == "list":
+        return await _run_models_list(args, config, console)
+    console.print("[yellow]unknown models subcommand")
+    return 1
+
+
+async def _run_models_search(args: argparse.Namespace, console: Console) -> int:
     tag = args.tag or None
     results = await search_hub(args.query, limit=args.limit, filter_tag=tag)
     if not results:
@@ -727,6 +770,70 @@ async def _run_models(args: argparse.Namespace, config: Config, console: Console
         "\n[dim]Pull into Ollama when a matching library tag exists:[/] "
         f"aitop pull {results[0].id.split('/')[-1]}"
     )
+    return 0
+
+
+async def _run_models_list(args: argparse.Namespace, config: Config, console: Console) -> int:
+    from aitop.utils.fmt import bytes_human
+
+    collector = SnapshotCollector(config, allow_privileged=True)
+    try:
+        snapshot = await collector.collect()
+    finally:
+        await collector.aclose()
+
+    engines = snapshot.online_engines
+    if args.engine:
+        engines = [e for e in engines if e.kind.value == args.engine.lower()]
+
+    rows: list[dict] = []
+    for eng in engines:
+        loaded_ids = {m.id for m in eng.loaded}
+        source = eng.loaded if args.loaded else eng.models
+        for model in source:
+            rows.append(
+                {
+                    "id": model.id,
+                    "name": model.name,
+                    "engine": eng.kind.value,
+                    "runtime": eng.name,
+                    "size_bytes": model.size_bytes,
+                    "quantization": model.quantization,
+                    "parameter_size": model.parameter_size,
+                    "loaded": model.id in loaded_ids,
+                }
+            )
+
+    if args.json:
+        import json
+
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    if not rows:
+        console.print("[yellow]no models found on reachable engines")
+        return 1
+
+    table = Table(box=None, pad_edge=False, padding=(0, 2))
+    table.add_column("", width=1)
+    table.add_column("MODEL", style="bold")
+    table.add_column("RUNTIME")
+    table.add_column("PARAMS", justify="right")
+    table.add_column("QUANT")
+    table.add_column("SIZE", justify="right")
+    for row in sorted(rows, key=lambda r: (r["engine"], r["name"])):
+        mark = "●" if row["loaded"] else "○"
+        style = "green" if row["loaded"] else "dim"
+        table.add_row(
+            f"[{style}]{mark}[/]",
+            row["name"],
+            row["runtime"],
+            row["parameter_size"] or "—",
+            row["quantization"] or "—",
+            bytes_human(row["size_bytes"]),
+        )
+    console.print(table)
+    console.print("[dim]● resident  ○ on disk[/]")
     return 0
 
 

@@ -2,7 +2,7 @@
 
 This is the seam that keeps telemetry collection independent of rendering.
 The collector publishes typed events; the TUI, the Prometheus exporter and the
-(future) WebSocket bridge each subscribe. Nothing downstream of the bus is
+WebSocket / SSE bridge each subscribe. Nothing downstream of the bus is
 allowed to import `aitop.hardware` or `aitop.engines` directly.
 
 Subscribers get a bounded queue: a slow renderer drops frames rather than

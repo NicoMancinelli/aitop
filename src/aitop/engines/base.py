@@ -43,6 +43,7 @@ class EngineCapability:
     LIST_LOADED = "list_loaded"
     UNLOAD = "unload"
     LOAD = "load"
+    DELETE = "delete"
     LIFECYCLE = "lifecycle"
     REBIND = "rebind"
     PULL = "pull"
@@ -186,6 +187,10 @@ class BaseEngine(abc.ABC):
     async def load(self, model_id: str) -> tuple[bool, str]:
         """Bring a model into memory/VRAM so the next request is warm."""
         return False, f"{self.display_name}: load not implemented"
+
+    async def delete(self, model_id: str) -> tuple[bool, str]:
+        """Remove a model from disk."""
+        return False, f"{self.display_name}: delete not implemented"
 
     async def rebind(self, host: str) -> tuple[bool, str]:
         return False, f"{self.display_name}: rebind not implemented"

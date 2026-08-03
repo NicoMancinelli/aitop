@@ -284,6 +284,12 @@ def _runtime_summary(snapshot: SystemSnapshot) -> str:
     summary = f"{len(online)} online · {len(loaded)} model(s) resident"
     if resident:
         summary += f" · {bytes_human(resident)}"
+    tps = next(
+        (e.stats.tokens_per_second for e in online if e.stats.tokens_per_second is not None),
+        None,
+    )
+    if tps is not None:
+        summary += f" · {tps:.1f} tok/s"
     return summary
 
 
@@ -320,6 +326,7 @@ def _engine_table(
     table.add_column("MODELS", justify="right", no_wrap=True)
     table.add_column("LOADED", justify="right", no_wrap=True)
     if detail:
+        table.add_column("TOK/S", justify="right", no_wrap=True)
         table.add_column("PID", justify="right", style=DIM, no_wrap=True)
         table.add_column("MANAGED", style=DIM, no_wrap=True)
 
@@ -338,6 +345,8 @@ def _engine_table(
         cells.append(str(len(engine.models)) if engine.models else "—")
         cells.append(Text(str(len(engine.loaded)), style="green" if engine.loaded else DIM))
         if detail:
+            tps = engine.stats.tokens_per_second
+            cells.append(f"{tps:.1f}" if tps is not None else "—")
             cells.append(str(engine.pid) if engine.pid else "—")
             cells.append(engine.managed_by or "—")
         table.add_row(*cells)

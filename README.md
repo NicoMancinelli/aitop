@@ -128,7 +128,10 @@ aitop rebind ollama tailscale   # use this node's Tailscale IPv4
 ### Models
 
 ```bash
+aitop models list               # models known to reachable engines (● = resident)
+aitop models list --loaded      # only what's in memory right now
 aitop pull llama3.2:3b          # stream an Ollama pull with a progress bar
+aitop delete ollama old-model   # remove a model from disk
 aitop models search qwen2.5     # search the Hugging Face hub (GGUF by default)
 aitop models search mlx-llama --tag mlx
 ```
@@ -136,7 +139,7 @@ aitop models search mlx-llama --tag mlx
 ### Fleet & metrics
 
 ```bash
-aitop serve                     # expose /api/snapshot, /api/stream, /metrics
+aitop serve                     # live UI + API (open http://127.0.0.1:9090/ui)
 aitop serve --host 0.0.0.0 -p 9090
 aitop fleet                     # render local + configured remote snapshots
 aitop fleet --json              # machine-readable array of SystemSnapshots
@@ -166,12 +169,12 @@ aitop/
 ├── config.py            Zero-config defaults, optional ~/.config/aitop/config.yaml
 ├── hub.py               Hugging Face model search (no huggingface_hub dependency)
 ├── prometheus.py        SystemSnapshot → Prometheus text exposition
-├── serve.py             Stdlib HTTP gateway: /api/snapshot + SSE + /metrics
+├── serve.py             Stdlib HTTP gateway: /ui + snapshot + SSE + WebSocket + /metrics
 ├── engines/
-│   ├── base.py          BaseEngine ABC: detect / poll / start / stop / load / unload / rebind / pull
+│   ├── base.py          BaseEngine ABC: detect / poll / start / stop / load / unload / delete / pull
 │   ├── lifecycle.py     systemd / launchd / docker / manual process control
 │   ├── registry.py      Endpoint probing + psutil process scan, all concurrent
-│   ├── ollama.py        /api/version, /api/tags, /api/ps, pull, load, unload, rebind
+│   ├── ollama.py        /api/version, /api/tags, /api/ps, pull, load, unload, delete, rebind
 │   ├── lmstudio.py      /api/v0/models, /v1/models fallback, `lms` CLI hooks
 │   └── openai_compat.py vLLM, llama-server, MLX OpenAI-compatible adapters
 ├── hardware/
@@ -185,13 +188,14 @@ aitop/
 ├── selfupdate.py        Install-method detection, release lookup, in-place upgrade
 ├── views/neofetch.py    Pure function of a SystemSnapshot → Rich renderable
 ├── views/tui.py         Textual btop-style live dashboard (bus subscriber)
+├── views/web.py         Embedded HTML live dashboard for `aitop serve /ui`
 └── cli.py               argparse entrypoint
 ```
 
-`SystemSnapshot` is fully JSON-serializable by design. A web UI, the Prometheus
-exporter (`aitop metrics` / `GET /metrics`), and remote fleet streaming are all
-"add a bus subscriber" — no changes to the collectors. `aitop serve` is that
-subscriber for the fleet.
+`SystemSnapshot` is fully JSON-serializable by design. The Textual TUI, the
+embedded web UI, the Prometheus exporter (`aitop metrics` / `GET /metrics`), and
+remote fleet streaming (SSE + WebSocket) are all "add a bus subscriber" — no
+changes to the collectors. `aitop serve` is that subscriber for the fleet.
 
 ### Graceful degradation
 
@@ -236,13 +240,13 @@ endpoints:
 
 ## Supported today
 
-| Runtime   | Detect | Models | Residency | Load | Unload | Lifecycle | Pull |
-|-----------|:------:|:------:|:---------:|:----:|:------:|:---------:|:----:|
-| Ollama    | ✅ | ✅ | ✅ (incl. GPU offload %) | ✅ | ✅ | ✅ | ✅ |
-| LM Studio | ✅ | ✅ | ✅ (native API or `lms`)  | ✅ (`lms`) | ✅ (`lms`) | ✅ | — |
-| vLLM      | ✅ | ✅ | ✅ (listed = loaded) | — | — | ✅ | — |
-| llama-server | ✅ | ✅ | ✅ | — | — | ✅ | — |
-| MLX       | ✅ | ✅ | ✅ | — | — | ✅ | — |
+| Runtime   | Detect | Models | Residency | Load | Unload | Delete | Lifecycle | Pull |
+|-----------|:------:|:------:|:---------:|:----:|:------:|:------:|:---------:|:----:|
+| Ollama    | ✅ | ✅ | ✅ (incl. GPU offload %) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| LM Studio | ✅ | ✅ | ✅ (native API or `lms`)  | ✅ (`lms`) | ✅ (`lms`) | — | ✅ | — |
+| vLLM      | ✅ | ✅ | ✅ (listed = loaded) | — | — | — | ✅ | — |
+| llama-server | ✅ | ✅ | ✅ | — | — | — | ✅ | — |
+| MLX       | ✅ | ✅ | ✅ | — | — | — | ✅ | — |
 
 | Platform | CPU | Memory | GPU | Power | Thermals |
 |----------|:---:|:------:|:---:|:-----:|:--------:|
