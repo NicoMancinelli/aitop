@@ -1,8 +1,8 @@
 """Tailscale detection.
 
 `tailscale status --json` gives us the node's tailnet identity in one call and
-works unprivileged. Used both for the neofetch line and, in Phase 2, to offer
-the tailnet IP as a bind target for engine rebinding.
+works unprivileged. Used both for the neofetch line and as a bind target for
+`aitop rebind ollama tailscale`.
 """
 
 from __future__ import annotations

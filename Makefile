@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap sync test lint fmt run watch doctor build clean
+.PHONY: help bootstrap sync test lint fmt run watch tui doctor serve build clean
 
 help:  ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -28,8 +28,14 @@ run:  ## Run the dashboard
 watch:  ## Run the dashboard in live mode
 	uv run aitop --watch
 
+tui:  ## Run the btop-style Textual dashboard
+	uv run aitop tui
+
 doctor:  ## Show what telemetry is available here
 	uv run aitop doctor
+
+serve:  ## Expose /api/snapshot for the fleet
+	uv run aitop serve
 
 build:  ## Build sdist + wheel
 	uv build

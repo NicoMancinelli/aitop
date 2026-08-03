@@ -4,8 +4,8 @@ An engine adapter is responsible for exactly three things:
 
 1. **Detect** — is this runtime present and reachable at a given endpoint?
 2. **Poll**   — return an `EngineSnapshot` describing models, residency, stats.
-3. **Control** — start/stop/restart/unload (Phase 2; the hooks are declared
-   here so the TUI can grey out unsupported actions today).
+3. **Control** — start/stop/restart/unload/rebind/pull. The hooks are declared
+   here so the UI can grey out unsupported actions via `capabilities`.
 
 Adapters never render, never print, and never raise out of `poll()`. A dead
 daemon is a snapshot with `state=OFFLINE`, not an exception.
@@ -30,6 +30,7 @@ from aitop.models import (
     LoadedModel,
     ModelInfo,
 )
+from aitop.version import __version__
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ class BaseEngine(abc.ABC):
     @property
     def client(self) -> httpx.AsyncClient:
         if self._client is None:
-            headers = {"User-Agent": "aitop/0.1"}
+            headers = {"User-Agent": f"aitop/{__version__}"}
             if self.endpoint.api_key:
                 headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
             self._client = httpx.AsyncClient(
@@ -113,7 +114,7 @@ class BaseEngine(abc.ABC):
             response = await self.client.get(url)
             response.raise_for_status()
             return response.json()
-        except (TimeoutError, httpx.HTTPError, ValueError) as exc:
+        except Exception as exc:  # transport, HTTP, decode, test-double gaps
             log.debug("%s GET %s failed: %s", self.name, url, exc)
             return None
 
@@ -183,6 +184,9 @@ class BaseEngine(abc.ABC):
 
     async def rebind(self, host: str) -> tuple[bool, str]:
         return False, f"{self.display_name}: rebind not implemented"
+
+    async def pull(self, model: str, *, on_progress=None) -> tuple[bool, str]:
+        return False, f"{self.display_name}: pull not implemented"
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} {self.host}:{self.port}>"

@@ -38,9 +38,19 @@ async def test_registry_polls_every_endpoint_concurrently(ollama_tags, ollama_ps
 
 
 @respx.mock
-async def test_registry_skips_unknown_engine_kinds():
-    """vLLM has a default port but no adapter yet — it must not blow up build()."""
+async def test_registry_builds_vllm_adapter():
+    """vLLM now has a real adapter and must be constructed like any other kind."""
     config = _config(EndpointConfig(kind=EngineKind.VLLM))
+    async with EngineRegistry(config) as registry:
+        engines = registry.build()
+        assert len(engines) == 1
+        assert engines[0].kind is EngineKind.VLLM
+
+
+@respx.mock
+async def test_registry_skips_unknown_engine_kinds():
+    """Kinds without an adapter must not blow up build()."""
+    config = _config(EndpointConfig(kind=EngineKind.UNKNOWN))
     async with EngineRegistry(config) as registry:
         assert registry.build() == []
         assert await registry.poll_all() == []

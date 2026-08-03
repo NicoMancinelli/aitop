@@ -48,7 +48,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
-path = "src/aitop/__init__.py"
+path = "src/aitop/version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aitop"]
