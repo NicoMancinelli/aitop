@@ -16,6 +16,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from typing import Any, ClassVar
 
+import httpx
+
 from aitop.engines.base import BaseEngine, EngineCapability
 from aitop.engines.lifecycle import restart_engine, start_engine, stop_engine
 from aitop.models import (
@@ -38,6 +40,7 @@ class OllamaEngine(BaseEngine):
             EngineCapability.LIST_MODELS,
             EngineCapability.LIST_LOADED,
             EngineCapability.UNLOAD,
+            EngineCapability.LOAD,
             EngineCapability.PULL,
             EngineCapability.LIFECYCLE,
             EngineCapability.REBIND,
@@ -135,6 +138,19 @@ class OllamaEngine(BaseEngine):
         if failed:
             return False, "failed to unload: " + ", ".join(failed)
         return True, f"unloaded {len(targets)} model(s)"
+
+    async def load(self, model_id: str) -> tuple[bool, str]:
+        """Warm a model into memory with a keep-alive generate request."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/api/generate",
+                json={"model": model_id, "keep_alive": "30m"},
+                timeout=httpx.Timeout(120.0, connect=5.0),
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            return False, f"load failed: {type(exc).__name__}: {exc}"
+        return True, f"loaded {model_id}"
 
     async def start(self) -> tuple[bool, str]:
         if self.endpoint.remote:

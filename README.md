@@ -118,6 +118,7 @@ aitop update           # upgrade in place
 aitop start ollama              # bring a runtime up (systemd / launchd / CLI)
 aitop stop ollama
 aitop restart lmstudio
+aitop load ollama llama3.2      # warm a model into memory
 aitop unload ollama             # evict all resident weights
 aitop unload ollama llama3.2    # evict one model
 aitop rebind ollama 0.0.0.0     # restart bound to a new host
@@ -132,13 +133,15 @@ aitop models search qwen2.5     # search the Hugging Face hub (GGUF by default)
 aitop models search mlx-llama --tag mlx
 ```
 
-### Fleet
+### Fleet & metrics
 
 ```bash
-aitop serve                     # expose /api/snapshot + /api/stream (default :9090)
+aitop serve                     # expose /api/snapshot, /api/stream, /metrics
 aitop serve --host 0.0.0.0 -p 9090
 aitop fleet                     # render local + configured remote snapshots
 aitop fleet --json              # machine-readable array of SystemSnapshots
+aitop metrics                   # one-shot Prometheus exposition (stdout)
+aitop config init               # write a starter ~/.config/aitop/config.yaml
 ```
 
 `aitop doctor` is the first thing to run when something looks wrong — it reports the
@@ -162,12 +165,13 @@ aitop/
 ├── collector.py         Fans out to hardware + engines + tailscale, emits a snapshot
 ├── config.py            Zero-config defaults, optional ~/.config/aitop/config.yaml
 ├── hub.py               Hugging Face model search (no huggingface_hub dependency)
-├── serve.py             Stdlib HTTP gateway: /api/snapshot + SSE /api/stream
+├── prometheus.py        SystemSnapshot → Prometheus text exposition
+├── serve.py             Stdlib HTTP gateway: /api/snapshot + SSE + /metrics
 ├── engines/
-│   ├── base.py          BaseEngine ABC: detect / poll / start / stop / unload / rebind / pull
+│   ├── base.py          BaseEngine ABC: detect / poll / start / stop / load / unload / rebind / pull
 │   ├── lifecycle.py     systemd / launchd / docker / manual process control
 │   ├── registry.py      Endpoint probing + psutil process scan, all concurrent
-│   ├── ollama.py        /api/version, /api/tags, /api/ps, pull, unload, rebind
+│   ├── ollama.py        /api/version, /api/tags, /api/ps, pull, load, unload, rebind
 │   ├── lmstudio.py      /api/v0/models, /v1/models fallback, `lms` CLI hooks
 │   └── openai_compat.py vLLM, llama-server, MLX OpenAI-compatible adapters
 ├── hardware/
@@ -185,8 +189,9 @@ aitop/
 ```
 
 `SystemSnapshot` is fully JSON-serializable by design. A web UI, the Prometheus
-exporter, and remote fleet streaming are all "add a bus subscriber" — no changes
-to the collectors. `aitop serve` is that subscriber for the fleet.
+exporter (`aitop metrics` / `GET /metrics`), and remote fleet streaming are all
+"add a bus subscriber" — no changes to the collectors. `aitop serve` is that
+subscriber for the fleet.
 
 ### Graceful degradation
 
@@ -231,13 +236,13 @@ endpoints:
 
 ## Supported today
 
-| Runtime   | Detect | Models | Residency | Unload | Lifecycle | Pull |
-|-----------|:------:|:------:|:---------:|:------:|:---------:|:----:|
-| Ollama    | ✅ | ✅ | ✅ (incl. GPU offload %) | ✅ | ✅ | ✅ |
-| LM Studio | ✅ | ✅ | ✅ (native API or `lms`)  | ✅ (`lms`) | ✅ | — |
-| vLLM      | ✅ | ✅ | ✅ (listed = loaded) | — | ✅ | — |
-| llama-server | ✅ | ✅ | ✅ | — | ✅ | — |
-| MLX       | ✅ | ✅ | ✅ | — | ✅ | — |
+| Runtime   | Detect | Models | Residency | Load | Unload | Lifecycle | Pull |
+|-----------|:------:|:------:|:---------:|:----:|:------:|:---------:|:----:|
+| Ollama    | ✅ | ✅ | ✅ (incl. GPU offload %) | ✅ | ✅ | ✅ | ✅ |
+| LM Studio | ✅ | ✅ | ✅ (native API or `lms`)  | ✅ (`lms`) | ✅ (`lms`) | ✅ | — |
+| vLLM      | ✅ | ✅ | ✅ (listed = loaded) | — | — | ✅ | — |
+| llama-server | ✅ | ✅ | ✅ | — | — | ✅ | — |
+| MLX       | ✅ | ✅ | ✅ | — | — | ✅ | — |
 
 | Platform | CPU | Memory | GPU | Power | Thermals |
 |----------|:---:|:------:|:---:|:-----:|:--------:|

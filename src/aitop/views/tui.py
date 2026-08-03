@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections import deque
 from typing import Any
 
 from rich.text import Text
@@ -21,11 +22,21 @@ from aitop.bus import EventBus, Topic
 from aitop.collector import SnapshotCollector
 from aitop.config import Config
 from aitop.models import EngineState, SystemSnapshot
-from aitop.utils.fmt import bytes_human, heat_color, percent, ratio_bar, watts
+from aitop.utils.fmt import (
+    bytes_human,
+    heat_color,
+    percent,
+    ratio_bar,
+    relative_time,
+    sparkline,
+    watts,
+)
+
+_HISTORY = 48
 
 
 class MetricPanel(Static):
-    """One labelled gauge block (CPU / memory / GPU)."""
+    """One labelled gauge block (CPU / memory / GPU) with a sparkline history."""
 
     DEFAULT_CSS = """
     MetricPanel {
@@ -34,10 +45,6 @@ class MetricPanel(Static):
         padding: 0 1;
         margin: 0 1 1 0;
         width: 1fr;
-    }
-    MetricPanel > .metric-title {
-        text-style: bold;
-        color: $accent;
     }
     """
 
@@ -67,7 +74,7 @@ class AiTopApp(App[None]):
         layout: vertical;
     }
     #metrics {
-        height: 7;
+        height: 8;
         padding: 1 0 0 1;
     }
     #engines {
@@ -94,6 +101,9 @@ class AiTopApp(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("u", "unload", "Unload"),
+        Binding("l", "load", "Load"),
+        Binding("s", "start_engine", "Start"),
+        Binding("x", "stop_engine", "Stop"),
         Binding("j", "json_dump", "JSON", show=False),
         Binding("?", "help", "Help", show=False),
     ]
@@ -117,6 +127,9 @@ class AiTopApp(App[None]):
         )
         self.snapshot: SystemSnapshot | None = None
         self._stream_task: asyncio.Task[None] | None = None
+        self._cpu_hist: deque[float] = deque(maxlen=_HISTORY)
+        self._mem_hist: deque[float] = deque(maxlen=_HISTORY)
+        self._gpu_hist: deque[float] = deque(maxlen=_HISTORY)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -132,10 +145,14 @@ class AiTopApp(App[None]):
 
     def on_mount(self) -> None:
         engines = self.query_one("#engines", DataTable)
-        engines.add_columns("State", "Runtime", "Endpoint", "Version", "Models", "Resident", "ms")
+        engines.add_columns(
+            "State", "Runtime", "Endpoint", "Version", "Models", "Resident", "tok/s", "ms"
+        )
         loaded = self.query_one("#loaded", DataTable)
         loaded.add_columns("Model", "Engine", "Size", "GPU", "Context", "Expires")
-        self.query_one("#log", RichLog).write("[dim]aitop tui — q quit · r refresh · u unload[/]")
+        self.query_one("#log", RichLog).write(
+            "[dim]aitop tui — q quit · r refresh · u unload · l load · s start · x stop[/]"
+        )
         self._stream_task = asyncio.create_task(self._run_collector())
         self._consume_bus()
 
@@ -168,6 +185,7 @@ class AiTopApp(App[None]):
     def _render_snapshot(self, snap: SystemSnapshot) -> None:
         hw = snap.hardware
         cpu = hw.cpu
+        self._cpu_hist.append(cpu.load_percent)
         cpu_body = Text()
         cpu_body.append(f"{cpu.model}\n")
         frac = cpu.load_percent / 100.0
@@ -175,9 +193,11 @@ class AiTopApp(App[None]):
         cpu_body.append(f"  {percent(cpu.load_percent)}")
         if cpu.power_watts is not None:
             cpu_body.append(f"  {watts(cpu.power_watts)}", style="dim")
+        cpu_body.append(f"\n{sparkline(list(self._cpu_hist))}", style="cyan")
         self.query_one("#cpu", MetricPanel).update_metric(cpu_body)
 
         mem = hw.memory
+        self._mem_hist.append(mem.used_percent)
         mem_body = Text()
         label = "unified" if mem.unified else "system"
         mem_body.append(
@@ -186,12 +206,17 @@ class AiTopApp(App[None]):
         mfrac = mem.used_percent / 100.0
         mem_body.append(ratio_bar(mfrac, width=24), style=heat_color(mfrac))
         mem_body.append(f"  {percent(mem.used_percent)}")
+        mem_body.append(f"\n{sparkline(list(self._mem_hist))}", style="cyan")
         self.query_one("#memory", MetricPanel).update_metric(mem_body)
 
         gpu_body = Text()
         if not hw.gpus:
-            gpu_body.append("no GPU detected", style="dim")
+            self._gpu_hist.append(0.0)
+            gpu_body.append("no GPU detected\n", style="dim")
+            gpu_body.append(sparkline(list(self._gpu_hist)), style="dim")
         else:
+            util = hw.gpus[0].utilization_percent or 0.0
+            self._gpu_hist.append(util)
             for gpu in hw.gpus[:2]:
                 gpu_body.append(f"{gpu.name}\n")
                 gfrac = (gpu.utilization_percent or 0) / 100.0
@@ -206,6 +231,7 @@ class AiTopApp(App[None]):
                 if gpu.power_watts is not None:
                     gpu_body.append(f"  {watts(gpu.power_watts)}", style="dim")
                 gpu_body.append("\n")
+            gpu_body.append(sparkline(list(self._gpu_hist)), style="cyan")
         self.query_one("#gpu", MetricPanel).update_metric(gpu_body)
 
         engines = self.query_one("#engines", DataTable)
@@ -218,6 +244,11 @@ class AiTopApp(App[None]):
                 EngineState.UNKNOWN: ("?", "dim"),
             }.get(eng.state, ("?", "dim"))
             binding = str(eng.binding) if eng.binding else "—"
+            tps = (
+                f"{eng.stats.tokens_per_second:.1f}"
+                if eng.stats.tokens_per_second is not None
+                else "—"
+            )
             engines.add_row(
                 Text(mark, style=style),
                 eng.name,
@@ -225,8 +256,9 @@ class AiTopApp(App[None]):
                 eng.version or "—",
                 str(len(eng.models)),
                 bytes_human(eng.resident_bytes) if eng.loaded else "—",
+                tps,
                 f"{eng.latency_ms:.0f}" if eng.latency_ms is not None else "—",
-                key=f"{eng.kind}:{binding}",
+                key=f"{eng.kind.value}",
             )
 
         loaded = self.query_one("#loaded", DataTable)
@@ -244,8 +276,8 @@ class AiTopApp(App[None]):
                 bytes_human(model.size_bytes),
                 gpu,
                 ctx,
-                "—",
-                key=f"{model.engine}:{model.id}",
+                relative_time(model.expires_at),
+                key=f"{model.engine.value}:{model.id}",
             )
 
         host = hw.host.hostname
@@ -263,6 +295,15 @@ class AiTopApp(App[None]):
     def action_unload(self) -> None:
         self.run_worker(self._unload_selected(), exclusive=True)
 
+    def action_load(self) -> None:
+        self.run_worker(self._load_prompt(), exclusive=True)
+
+    def action_start_engine(self) -> None:
+        self.run_worker(self._lifecycle_selected("start"), exclusive=True)
+
+    def action_stop_engine(self) -> None:
+        self.run_worker(self._lifecycle_selected("stop"), exclusive=True)
+
     async def _unload_selected(self) -> None:
         table = self.query_one("#loaded", DataTable)
         if table.row_count == 0:
@@ -273,20 +314,78 @@ class AiTopApp(App[None]):
             return
         key = str(row_key.value)
         engine_kind, _, model_id = key.partition(":")
-        engines = self.collector.engines.engines
-        target = next((e for e in engines if e.kind.value == engine_kind), None)
+        target = self._engine_by_kind(engine_kind)
         if target is None:
-            self.query_one("#log", RichLog).write(f"[yellow]no adapter for {engine_kind}[/]")
             return
         if not target.supports("unload"):
             self.query_one("#log", RichLog).write(f"[yellow]{target.name} cannot unload[/]")
             return
         self.query_one("#log", RichLog).write(f"[cyan]unloading {model_id}…[/]")
         ok, message = await target.unload(model_id)
+        self._log_result(ok, message, source=target.name)
+        await self._force_refresh()
+
+    async def _load_prompt(self) -> None:
+        """Load the first non-resident model on the focused engine, if any."""
+        engine = self._selected_engine()
+        if engine is None:
+            self.query_one("#log", RichLog).write("[yellow]select an engine row first[/]")
+            return
+        if not engine.supports("load"):
+            self.query_one("#log", RichLog).write(f"[yellow]{engine.name} cannot load[/]")
+            return
+        snap = self.snapshot
+        if snap is None:
+            return
+        eng_snap = next((e for e in snap.engines if e.kind == engine.kind), None)
+        if eng_snap is None or not eng_snap.models:
+            self.query_one("#log", RichLog).write("[yellow]no models available to load[/]")
+            return
+        loaded_ids = {m.id for m in eng_snap.loaded}
+        candidate = next((m for m in eng_snap.models if m.id not in loaded_ids), None)
+        if candidate is None:
+            self.query_one("#log", RichLog).write("[dim]all known models already resident[/]")
+            return
+        self.query_one("#log", RichLog).write(f"[cyan]loading {candidate.id}…[/]")
+        ok, message = await engine.load(candidate.id)
+        self._log_result(ok, message, source=engine.name)
+        await self._force_refresh()
+
+    async def _lifecycle_selected(self, action: str) -> None:
+        engine = self._selected_engine()
+        if engine is None:
+            self.query_one("#log", RichLog).write("[yellow]select an engine row first[/]")
+            return
+        if not engine.supports("lifecycle"):
+            self.query_one("#log", RichLog).write(
+                f"[yellow]{engine.name} has no lifecycle control[/]"
+            )
+            return
+        self.query_one("#log", RichLog).write(f"[cyan]{action} {engine.name}…[/]")
+        ok, message = await getattr(engine, action)()
+        self._log_result(ok, message, source=engine.name)
+        await self._force_refresh()
+
+    def _selected_engine(self):
+        table = self.query_one("#engines", DataTable)
+        if table.row_count == 0:
+            return None
+        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        if row_key is None or row_key.value is None:
+            return None
+        return self._engine_by_kind(str(row_key.value))
+
+    def _engine_by_kind(self, kind: str):
+        engines = self.collector.engines.engines
+        target = next((e for e in engines if e.kind.value == kind), None)
+        if target is None:
+            self.query_one("#log", RichLog).write(f"[yellow]no adapter for {kind}[/]")
+        return target
+
+    def _log_result(self, ok: bool, message: str, *, source: str) -> None:
         colour = "green" if ok else "yellow"
         self.query_one("#log", RichLog).write(f"[{colour}]{message}[/]")
-        self.bus.publish(Topic.LIFECYCLE, message, source=target.name)
-        await self._force_refresh()
+        self.bus.publish(Topic.LIFECYCLE, message, source=source)
 
     def action_json_dump(self) -> None:
         if self.snapshot is None:
@@ -295,7 +394,7 @@ class AiTopApp(App[None]):
 
     def action_help(self) -> None:
         self.query_one("#log", RichLog).write(
-            "[bold]keys[/]  q quit · r refresh · u unload selected model · j dump json"
+            "[bold]keys[/]  q quit · r refresh · u unload · l load · s start · x stop · j json"
         )
 
 

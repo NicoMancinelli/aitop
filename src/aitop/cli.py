@@ -57,8 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
             "  aitop tui              live btop-style TUI\n"
             "  aitop --json | jq .    machine-readable snapshot\n"
             "  aitop unload ollama    evict resident Ollama weights\n"
+            "  aitop load ollama m     warm a model into memory\n"
             "  aitop pull llama3.2    pull a model into Ollama\n"
+            "  aitop metrics           Prometheus text exposition\n"
             "  aitop serve            expose this node to the fleet\n"
+            "  aitop config init       write a starter config.yaml\n"
             "  aitop update           upgrade to the latest release\n"
             "  aitop doctor           show what telemetry is available here\n"
         ),
@@ -164,6 +167,11 @@ def build_parser() -> argparse.ArgumentParser:
     unload.add_argument("engine", help="runtime kind or endpoint name")
     unload.add_argument("model", nargs="?", default=None, help="model id (default: all)")
 
+    load = subparsers.add_parser("load", help="warm a model into memory/VRAM")
+    _add_common(load)
+    load.add_argument("engine", help="runtime kind or endpoint name")
+    load.add_argument("model", help="model id to load")
+
     rebind = subparsers.add_parser(
         "rebind",
         help="rebind an engine to a new host (e.g. Tailscale IP)",
@@ -179,6 +187,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--engine",
         default="ollama",
         help="runtime to pull into (default: ollama)",
+    )
+
+    metrics = subparsers.add_parser(
+        "metrics",
+        help="emit a Prometheus text exposition of the current snapshot",
+    )
+    _add_common(metrics)
+    metrics.add_argument(
+        "--no-privileged",
+        action="store_true",
+        help="never invoke sudo helpers such as powermetrics",
+    )
+
+    cfg = subparsers.add_parser("config", help="config file helpers")
+    _add_common(cfg)
+    cfg_sub = cfg.add_subparsers(dest="config_command", required=True)
+    init_cfg = cfg_sub.add_parser("init", help="write a starter config.yaml")
+    _add_common(init_cfg)
+    init_cfg.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing config file",
+    )
+    init_cfg.add_argument(
+        "--path",
+        type=Path,
+        default=None,
+        help=f"destination path (default: {config_path()})",
     )
 
     models = subparsers.add_parser("models", help="model hub helpers")
@@ -274,10 +310,16 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_run_lifecycle(args, config, console))
             case "unload":
                 return asyncio.run(_run_unload(args, config, console))
+            case "load":
+                return asyncio.run(_run_load(args, config, console))
             case "rebind":
                 return asyncio.run(_run_rebind(args, config, console))
             case "pull":
                 return asyncio.run(_run_pull(args, config, console))
+            case "metrics":
+                return asyncio.run(_run_metrics(args, config, console))
+            case "config":
+                return _run_config(args, console)
             case "models":
                 return asyncio.run(_run_models(args, config, console))
             case _:
@@ -404,7 +446,7 @@ async def _run_serve(args: argparse.Namespace, config: Config, console: Console)
         interval=args.interval,
     )
     console.print(f"[bold]aitop serve[/] http://{host}:{port}")
-    console.print("[dim]/healthz  /api/snapshot  /api/stream[/]")
+    console.print("[dim]/healthz  /api/snapshot  /api/stream  /metrics[/]")
     try:
         await server.run()
     finally:
@@ -512,6 +554,82 @@ async def _run_unload(args: argparse.Namespace, config: Config, console: Console
         return 0 if ok else 1
     finally:
         await registry.aclose()
+
+
+async def _run_load(args: argparse.Namespace, config: Config, console: Console) -> int:
+    engine, registry, err = await _resolve_engine(config, args.engine)
+    try:
+        if err or engine is None:
+            console.print(f"[yellow]{err}")
+            return 1
+        if not engine.supports("load"):
+            console.print(f"[yellow]{engine.name} does not support load")
+            return 1
+        console.print(f"[cyan]loading {args.model} on {engine.name}…")
+        ok, message = await engine.load(args.model)
+        console.print(f"[{'green' if ok else 'yellow'}]{message}")
+        return 0 if ok else 1
+    finally:
+        await registry.aclose()
+
+
+async def _run_metrics(args: argparse.Namespace, config: Config, console: Console) -> int:
+    from aitop.prometheus import render_prometheus
+
+    collector = SnapshotCollector(config, allow_privileged=not args.no_privileged)
+    try:
+        snapshot = await collector.collect()
+        # Prometheus scrapers expect plain text on stdout — no Rich markup.
+        sys.stdout.write(render_prometheus(snapshot))
+        return 0
+    finally:
+        await collector.aclose()
+
+
+_SAMPLE_CONFIG = """\
+# aitop config — generated by `aitop config init`
+# Docs: https://github.com/NicoMancinelli/aitop
+
+polling:
+  hardware_interval: 2.0
+  engine_interval: 2.0
+
+ui:
+  show_per_core: true
+
+updates:
+  check: true
+  auto_apply: false
+
+fleet:
+  serve_host: 127.0.0.1
+  serve_port: 9090
+  # nodes:
+  #   - name: pveclaw
+  #     url: http://100.100.1.7:9090
+
+# endpoints:
+#   - kind: ollama
+#     host: 100.100.1.7
+#     name: pveclaw-ollama
+#     remote: true
+#   - kind: lmstudio
+#     enabled: false
+"""
+
+
+def _run_config(args: argparse.Namespace, console: Console) -> int:
+    if args.config_command != "init":
+        console.print("[yellow]unknown config subcommand")
+        return 1
+    path = args.path or config_path()
+    if path.exists() and not args.force:
+        console.print(f"[yellow]{path} already exists — pass --force to overwrite")
+        return 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_SAMPLE_CONFIG)
+    console.print(f"[green]wrote {path}")
+    return 0
 
 
 async def _run_rebind(args: argparse.Namespace, config: Config, console: Console) -> int:

@@ -90,5 +90,23 @@ def heat_color(fraction: float | None) -> str:
     return "red"
 
 
+def sparkline(values: list[float], width: int = 24, *, loft: float = 100.0) -> str:
+    """Compact Unicode sparkline. Values are scaled against `loft` (or the max)."""
+    if width <= 0:
+        return ""
+    if not values:
+        return " " * width
+    window = values[-width:]
+    if len(window) < width:
+        window = [0.0] * (width - len(window)) + window
+    peak = max(loft, max(window) if window else 0.0, 1.0)
+    chars = " ▁▂▃▄▅▆▇█"
+    out: list[str] = []
+    for value in window:
+        idx = int(max(0.0, min(1.0, value / peak)) * (len(chars) - 1))
+        out.append(chars[idx])
+    return "".join(out)
+
+
 def truncate(text: str, width: int) -> str:
     return text if len(text) <= width else text[: max(0, width - 1)] + "…"

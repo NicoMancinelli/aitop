@@ -35,6 +35,7 @@ class LMStudioEngine(BaseEngine):
             EngineCapability.LIST_MODELS,
             EngineCapability.LIST_LOADED,
             EngineCapability.UNLOAD,
+            EngineCapability.LOAD,
             EngineCapability.LIFECYCLE,
         }
     )
@@ -165,6 +166,17 @@ class LMStudioEngine(BaseEngine):
         result = await run(*argv, timeout=20.0)
         if result.ok:
             return True, f"unloaded {model_id or 'all models'}"
+        return False, result.reason
+
+    async def load(self, model_id: str) -> tuple[bool, str]:
+        """`lms load` warms weights into memory. Requires the CLI."""
+        if self.endpoint.remote:
+            return False, "load requires a local `lms` CLI"
+        if which("lms") is None:
+            return False, "`lms` CLI not found on PATH"
+        result = await run("lms", "load", model_id, timeout=120.0)
+        if result.ok:
+            return True, f"loaded {model_id}"
         return False, result.reason
 
     async def start(self) -> tuple[bool, str]:

@@ -5,6 +5,7 @@
   GET /healthz          -> {"ok": true, "version": "..."}
   GET /api/snapshot     -> SystemSnapshot JSON
   GET /api/stream       -> text/event-stream of snapshots
+  GET /metrics          -> Prometheus text exposition
 
 Implemented with the stdlib so the runtime dependency set stays small.
 """
@@ -149,7 +150,12 @@ class SnapshotServer:
                     {
                         "service": "aitop",
                         "version": __version__,
-                        "endpoints": ["/healthz", "/api/snapshot", "/api/stream"],
+                        "endpoints": [
+                            "/healthz",
+                            "/api/snapshot",
+                            "/api/stream",
+                            "/metrics",
+                        ],
                     },
                 )
             elif path == "/healthz":
@@ -164,6 +170,17 @@ class SnapshotServer:
                 )
             elif path == "/api/stream":
                 await self._write_sse(writer)
+            elif path == "/metrics":
+                from aitop.prometheus import render_prometheus
+
+                snapshot = await self.latest()
+                body = render_prometheus(snapshot).encode()
+                await self._write_raw(
+                    writer,
+                    200,
+                    body,
+                    content_type="text/plain; version=0.0.4; charset=utf-8",
+                )
             else:
                 await self._write(writer, 404, {"error": "not found"})
         except Exception as exc:
