@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections import deque
 from datetime import UTC, datetime
 from typing import Any
@@ -246,6 +247,11 @@ class AiTopApp(App[None]):
         Binding("1", "tab_engines", "Engines", show=False),
         Binding("2", "tab_catalog", "Catalog", show=False),
         Binding("3", "tab_loaded", "Loaded", show=False),
+        Binding("4", "tab_fleet", "Fleet", show=False),
+        Binding("n", "next_node", "Node"),
+        Binding("N", "prev_node", "Prev node", show=False),
+        Binding("left_square_bracket", "prev_node", "Prev node", show=False),
+        Binding("right_square_bracket", "next_node", "Next node", show=False),
         Binding("j", "json_dump", "JSON", show=False),
         Binding("escape", "clear_filter", "Clear filter", show=False),
     ]
@@ -268,6 +274,8 @@ class AiTopApp(App[None]):
             allow_privileged=allow_privileged,
         )
         self.snapshot: SystemSnapshot | None = None
+        self.fleet_snapshots: list[SystemSnapshot] = []
+        self.node_index = 0
         self._stream_task: asyncio.Task[None] | None = None
         self._cpu_hist: deque[float] = deque(maxlen=_HISTORY)
         self._mem_hist: deque[float] = deque(maxlen=_HISTORY)
@@ -294,6 +302,8 @@ class AiTopApp(App[None]):
                 yield DataTable(id="catalog", cursor_type="row", zebra_stripes=True)
             with TabPane("Loaded", id="tab-loaded"):
                 yield DataTable(id="loaded", cursor_type="row", zebra_stripes=True)
+            with TabPane("Fleet", id="tab-fleet"):
+                yield DataTable(id="fleet", cursor_type="row", zebra_stripes=True)
         yield DetailBar(id="detail")
         yield RichLog(id="log", highlight=True, markup=True, max_lines=500)
         yield Footer()
@@ -318,8 +328,10 @@ class AiTopApp(App[None]):
         loaded.add_columns(
             "Model", "Runtime", "Params", "Quant", "Size", "GPU", "Context", "Expires"
         )
+        fleet = self.query_one("#fleet", DataTable)
+        fleet.add_columns("Node", "Host", "Engines", "Online", "GPUs", "VRAM", "Age")
         self.query_one("#log", RichLog).write(
-            "[dim]aitop tui — [bold]?[/] help · space pause · / filter · 1/2/3 panes[/]"
+            "[dim]aitop tui — [bold]?[/] help · space pause · / filter · n node · 1/2/3/4 panes[/]"
         )
         self._stream_task = asyncio.create_task(self._run_collector())
         self._consume_bus()
@@ -334,9 +346,32 @@ class AiTopApp(App[None]):
 
     async def _run_collector(self) -> None:
         try:
-            await self.collector.stream(interval=self.interval)
+            if self.config.fleet.nodes:
+                await self._stream_fleet()
+            else:
+                await self.collector.stream(interval=self.interval)
         except asyncio.CancelledError:
             raise
+
+    async def _stream_fleet(self) -> None:
+        """Local + remote snapshots when fleet.nodes is configured."""
+        period = self.interval
+        while True:
+            cycle_start = time.perf_counter()
+            try:
+                snaps = await self.collector.collect_fleet()
+                self.fleet_snapshots = snaps
+                if snaps:
+                    idx = self.node_index % len(snaps)
+                    self.node_index = idx
+                    snap = snaps[idx]
+                    self.bus.publish(Topic.SNAPSHOT, snap, source=snap.node)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.bus.publish(Topic.ERROR, str(exc), source="fleet")
+            elapsed = time.perf_counter() - cycle_start
+            await asyncio.sleep(max(0.1, period - elapsed))
 
     @work(exclusive=True)
     async def _consume_bus(self) -> None:
@@ -368,6 +403,7 @@ class AiTopApp(App[None]):
         self._render_engines(snap)
         self._render_catalog(snap)
         self._render_loaded(snap)
+        self._render_fleet()
         self._render_status(snap)
         self._render_detail()
         self._log_new_errors(snap)
@@ -376,8 +412,11 @@ class AiTopApp(App[None]):
         online = len(snap.online_engines)
         pause = " · PAUSED" if self.paused else ""
         filt = f" · /{self.catalog_filter}" if self.catalog_filter else ""
+        node = ""
+        if self.fleet_snapshots:
+            node = f" · node {snap.node} ({self.node_index + 1}/{len(self.fleet_snapshots)})"
         self.sub_title = (
-            f"{host} · {online} online · {snap.duration_ms or 0:.0f} ms{pause}{filt}"
+            f"{host}{node} · {online} online · {snap.duration_ms or 0:.0f} ms{pause}{filt}"
         )
 
     def _render_metrics(self, snap: SystemSnapshot) -> None:
@@ -612,11 +651,51 @@ class AiTopApp(App[None]):
             )
         _restore_cursor(table, prev)
 
+    def _render_fleet(self) -> None:
+        table = self.query_one("#fleet", DataTable)
+        prev = _row_key(table)
+        table.clear()
+        snaps = self.fleet_snapshots
+        if not snaps:
+            if self.config.fleet.nodes:
+                table.add_row(
+                    Text("waiting for fleet snapshots…", style="dim"),
+                    key=_EMPTY,
+                )
+            else:
+                table.add_row(
+                    Text(
+                        "no fleet.nodes — add peers in config, or use aitop fleet",
+                        style="dim",
+                    ),
+                    key=_EMPTY,
+                )
+            return
+        for i, snap in enumerate(snaps):
+            mark = "▸ " if i == self.node_index else "  "
+            host = snap.hardware.host.hostname or snap.node
+            online = len(snap.online_engines)
+            gpus = len(snap.hardware.gpus)
+            vram = sum((g.vram_used_bytes or 0) for g in snap.hardware.gpus)
+            table.add_row(
+                f"{mark}{snap.node}",
+                host,
+                str(len(snap.engines)),
+                str(online),
+                str(gpus) if gpus else "—",
+                bytes_human(vram) if vram else "—",
+                _age_label(snap.collected_at),
+                key=snap.node,
+            )
+        _restore_cursor(table, prev)
+
     def _render_status(self, snap: SystemSnapshot) -> None:
         text = Text()
         if self.paused:
             text.append(" PAUSED ", style="bold reverse #d29922")
             text.append(f" {_age_label(snap.collected_at)}  ", style="#d29922")
+        if self.fleet_snapshots:
+            text.append(f"node {snap.node}  ·  ")
         text.append(f"engines {len(snap.online_engines)}/{len(snap.engines)}")
         text.append("  ·  ")
         text.append(f"loaded {len(snap.all_loaded)}")
@@ -714,6 +793,28 @@ class AiTopApp(App[None]):
                     bar.update_detail(Text(" · ".join(bits)))
                     return
             bar.update_detail(Text(model_id, style="dim"))
+            return
+
+        if active == "tab-fleet":
+            key = _row_key(self.query_one("#fleet", DataTable))
+            if key is None:
+                bar.update_detail(
+                    Text("configure fleet.nodes to monitor remote aitop serve peers", style="dim")
+                )
+                return
+            peer = next((s for s in self.fleet_snapshots if s.node == key), None)
+            if peer is None:
+                bar.update_detail(Text(key, style="dim"))
+                return
+            bits = [
+                peer.node,
+                peer.hardware.host.hostname or "—",
+                f"{len(peer.online_engines)} online",
+                f"{len(peer.all_loaded)} loaded",
+            ]
+            if peer.duration_ms is not None:
+                bits.append(f"{peer.duration_ms:.0f} ms")
+            bar.update_detail(Text(" · ".join(bits)))
             return
 
         # Loaded
@@ -836,10 +937,48 @@ class AiTopApp(App[None]):
         self.query_one("#loaded", DataTable).focus()
         self._render_detail()
 
+    def action_tab_fleet(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-fleet"
+        self.query_one("#fleet", DataTable).focus()
+        self._render_detail()
+
+    def action_next_node(self) -> None:
+        self._cycle_node(+1)
+
+    def action_prev_node(self) -> None:
+        self._cycle_node(-1)
+
+    def _cycle_node(self, delta: int) -> None:
+        if not self.fleet_snapshots:
+            self.query_one("#log", RichLog).write(
+                "[dim]no fleet nodes — configure fleet.nodes or stay on local[/]"
+            )
+            return
+        self.node_index = (self.node_index + delta) % len(self.fleet_snapshots)
+        snap = self.fleet_snapshots[self.node_index]
+        self.snapshot = snap
+        # Reset sparklines when jumping nodes so history isn't mixed.
+        self._cpu_hist.clear()
+        self._mem_hist.clear()
+        self._gpu_hist.clear()
+        self._vram_hist.clear()
+        self._render_snapshot(snap)
+        self.query_one("#log", RichLog).write(
+            f"[cyan]node → {snap.node} ({self.node_index + 1}/{len(self.fleet_snapshots)})[/]"
+        )
+
     def action_refresh(self) -> None:
         self.run_worker(self._force_refresh(), exclusive=True)
 
     async def _force_refresh(self) -> None:
+        if self.config.fleet.nodes:
+            snaps = await self.collector.collect_fleet()
+            self.fleet_snapshots = snaps
+            if snaps:
+                self.node_index %= len(snaps)
+                snap = snaps[self.node_index]
+                self.bus.publish(Topic.SNAPSHOT, snap, source=snap.node)
+                return
         snap = await self.collector.collect()
         self.bus.publish(Topic.SNAPSHOT, snap, source=self.collector.node)
         if not self.paused:

@@ -28,7 +28,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -44,6 +44,7 @@ _ENDPOINTS = [
     "/ui",
     "/healthz",
     "/api/snapshot",
+    "/api/fleet",
     "/api/stream",
     "/api/ws",
     "/metrics",
@@ -54,7 +55,7 @@ _ENDPOINTS = [
     "/api/models/unload",
     "/api/models/delete",
 ]
-_PUBLIC_GET = frozenset({"/healthz"})
+_PUBLIC_GET = frozenset({"/healthz", "/ui"})
 _MUTATING_PREFIXES = ("/api/engines/", "/api/models/")
 
 
@@ -155,7 +156,13 @@ class SnapshotServer:
         async with self._server:
             await self._server.serve_forever()
 
-    def _authorized(self, headers: dict[str, str], *, mutating: bool) -> bool:
+    def _authorized(
+        self,
+        headers: dict[str, str],
+        *,
+        mutating: bool,
+        query: dict[str, list[str]] | None = None,
+    ) -> bool:
         if not self.token:
             return True
         if not mutating and not self.auth_all:
@@ -164,6 +171,13 @@ class SnapshotServer:
         auth = headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             provided = auth[7:].strip()
+        # EventSource cannot set headers — accept ?token= / ?access_token=.
+        if not provided and query:
+            for key in ("token", "access_token"):
+                values = query.get(key) or []
+                if values and values[0]:
+                    provided = values[0]
+                    break
         return bool(provided) and provided == self.token
 
     async def _handle(
@@ -190,6 +204,7 @@ class SnapshotServer:
             method, raw_path, *_ = request_line.decode("latin-1", "replace").split()
             parsed = urlparse(raw_path)
             path = parsed.path
+            query = parse_qs(parsed.query)
             length = int(headers.get("content-length", "0") or "0")
             body = await reader.readexactly(length) if length > 0 else b""
 
@@ -204,12 +219,16 @@ class SnapshotServer:
             needs_auth = mutating or (
                 self.auth_all and path not in _PUBLIC_GET and method == "GET"
             )
-            if needs_auth and not self._authorized(headers, mutating=True):
+            if needs_auth and not self._authorized(
+                headers, mutating=True, query=query
+            ):
                 await self._write(writer, 401, {"error": "unauthorized"})
                 return
 
             if method == "GET" and path == "/api/ws":
-                if self.auth_all and not self._authorized(headers, mutating=True):
+                if self.auth_all and not self._authorized(
+                    headers, mutating=True, query=query
+                ):
                     await self._write(writer, 401, {"error": "unauthorized"})
                     return
                 keep_open = await self._websocket(reader, writer, headers)
@@ -242,7 +261,10 @@ class SnapshotServer:
                 await self._write_raw(
                     writer,
                     200,
-                    render_dashboard(auth_required=bool(self.token)),
+                    render_dashboard(
+                        auth_required=bool(self.token),
+                        auth_all=bool(self.token and self.auth_all),
+                    ),
                     content_type="text/html; charset=utf-8",
                 )
             elif path == "/healthz":
@@ -253,6 +275,17 @@ class SnapshotServer:
                     writer,
                     200,
                     snapshot.model_dump_json().encode(),
+                    content_type="application/json",
+                )
+            elif path == "/api/fleet":
+                fleet = await self.collector.collect_fleet()
+                payload = json.dumps(
+                    [s.model_dump(mode="json") for s in fleet]
+                ).encode()
+                await self._write_raw(
+                    writer,
+                    200,
+                    payload,
                     content_type="application/json",
                 )
             elif path == "/api/stream":

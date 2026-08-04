@@ -293,8 +293,10 @@ class HelpScreen(ModalScreen[None]):
 
     HELP = """\
 [bold #39d2c0]Navigation[/]
-  [bold]tab[/] / [bold]shift-tab[/]   cycle Engines · Catalog · Loaded · log
-  [bold]1[/] [bold]2[/] [bold]3[/]              jump to Engines / Catalog / Loaded
+  [bold]tab[/] / [bold]shift-tab[/]   cycle Engines · Catalog · Loaded · Fleet · log
+  [bold]1[/] [bold]2[/] [bold]3[/] [bold]4[/]          jump to Engines / Catalog / Loaded / Fleet
+  [bold]n[/] / [bold]][/]              next fleet node
+  [bold]N[/] / [bold][[/]              previous fleet node
 
 [bold #39d2c0]Lifecycle[/]
   [bold]s[/]  start selected engine     [bold]e[/]  restart (confirm)
@@ -313,7 +315,9 @@ class HelpScreen(ModalScreen[None]):
   [bold]q[/]      quit
 
 Selection details (pid, scope, errors, format) appear in the strip
-above the log as you move the cursor.
+above the log as you move the cursor. Fleet pane lists configured
+peers from [bold]fleet.nodes[/]; [bold]n[/] switches which node the
+gauges and tables render.
 """
 
     def compose(self) -> ComposeResult:

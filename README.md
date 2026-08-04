@@ -153,6 +153,8 @@ aitop rebind ollama tailscale   # use this node's Tailscale IPv4
 aitop models list               # models known to reachable engines (● = resident)
 aitop models list --loaded      # only what's in memory right now
 aitop pull llama3.2:3b          # stream an Ollama pull with a progress bar
+aitop pull --hf org/model-GGUF  # pull a Hugging Face GGUF repo via hf.co/…
+aitop models ingest org/model-GGUF
 aitop delete ollama old-model   # remove a model from disk
 aitop models search qwen2.5     # search the Hugging Face hub (GGUF by default)
 aitop models search mlx-llama --tag mlx
@@ -175,7 +177,10 @@ The web UI at `/ui` can start/stop/restart engines and load/unload/delete models
 via `POST /api/engines/…` and `POST /api/models/…`. When `--token` (or
 `fleet.serve_token`) is set, those POSTs need `Authorization: Bearer <token>`
 (or `X-Aitop-Token`). Paste the token into the header field on `/ui` — it is
-stored in `localStorage` only.
+stored in `localStorage` only. With `--auth-all`, reads are gated too; the live
+EventSource uses `?token=` because browsers cannot set SSE headers. `GET /api/fleet`
+returns local + configured peer snapshots for the multi-node switcher on `/ui`
+and the TUI Fleet tab (`n` / `]` to cycle nodes).
 
 `aitop doctor` is the first thing to run when something looks wrong — it reports the
 install method, which config file was loaded, which hardware probes activated, and
@@ -197,13 +202,14 @@ aitop/
 ├── bus.py               Async pub/sub; bounded, drop-oldest queues per subscriber
 ├── collector.py         Fans out to hardware + engines + tailscale, emits a snapshot
 ├── config.py            Zero-config defaults, optional ~/.config/aitop/config.yaml
-├── hub.py               Hugging Face model search (no huggingface_hub dependency)
+├── hub.py               Hugging Face model search + hf.co pull ref mapping
 ├── prometheus.py        SystemSnapshot → Prometheus text exposition
-├── serve.py             Stdlib HTTP gateway: /ui + snapshot + SSE + WS + /metrics + control API
+├── serve.py             Stdlib HTTP gateway: /ui + snapshot + fleet + SSE + WS + /metrics + control API
 ├── engines/
 │   ├── base.py          BaseEngine ABC: detect / poll / start / stop / load / unload / delete / pull
 │   ├── lifecycle.py     systemd / launchd / docker / manual process control
 │   ├── registry.py      Endpoint probing + psutil process scan, all concurrent
+│   ├── stats.py         InferenceStats parsers (Ollama generate, LM Studio, Prometheus)
 │   ├── ollama.py        /api/version, /api/tags, /api/ps, pull, load, unload, delete, rebind
 │   ├── lmstudio.py      /api/v0/models, /v1/models fallback, `lms` CLI hooks
 │   └── openai_compat.py vLLM, llama-server, MLX OpenAI-compatible adapters

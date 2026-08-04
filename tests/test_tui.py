@@ -170,6 +170,8 @@ async def test_tui_smoke_mount_and_render():
         assert catalog.row_count == 2
         loaded = app.query_one("#loaded")
         assert loaded.row_count == 1
+        fleet = app.query_one("#fleet")
+        assert fleet.row_count >= 1  # empty-state row when no fleet.nodes
 
         # Cursor preservation across re-render
         engines.move_cursor(row=0)

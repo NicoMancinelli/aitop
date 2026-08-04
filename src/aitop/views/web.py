@@ -1,8 +1,11 @@
 """Embedded live web dashboard for `aitop serve`.
 
 A single self-contained HTML page — no build step, no CDN fonts. Polls
-`/api/snapshot` on an interval (and upgrades to EventSource `/api/stream`
-when available). Includes control actions that POST to the serve API.
+`/api/snapshot` (or `/api/fleet`) on an interval and upgrades to EventSource
+`/api/stream` when available. Includes control actions that POST to the serve API.
+
+When `auth_all` is on, EventSource appends `?token=` because browsers cannot
+set Authorization headers on SSE connections.
 """
 
 from __future__ import annotations
@@ -10,8 +13,9 @@ from __future__ import annotations
 from aitop.version import __version__
 
 
-def render_dashboard(*, auth_required: bool = False) -> bytes:
+def render_dashboard(*, auth_required: bool = False, auth_all: bool = False) -> bytes:
     auth_flag = "true" if auth_required else "false"
+    auth_all_flag = "true" if auth_all else "false"
     html = f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -84,6 +88,9 @@ def render_dashboard(*, auth_required: bool = False) -> bytes:
   }}
   button:hover {{ border-color: var(--cyan); color: var(--cyan); }}
   button.danger:hover {{ border-color: var(--hot); color: var(--hot); }}
+  button.node {{ opacity: .7; }}
+  button.node.active {{ opacity: 1; border-color: var(--cyan); color: var(--cyan); }}
+  #nodes {{ display: flex; flex-wrap: wrap; gap: .35rem; margin-bottom: 1rem; }}
   #toast {{
     position: fixed; right: 1rem; bottom: 1rem; max-width: 28rem;
     background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
@@ -110,6 +117,7 @@ def render_dashboard(*, auth_required: bool = False) -> bytes:
     <button type="button" id="save-token">save</button>
   </div>
 </header>
+<nav id="nodes" hidden></nav>
 <section class="grid" id="metrics"></section>
 <section class="card">
   <h2>Runtimes</h2>
@@ -136,13 +144,20 @@ def render_dashboard(*, auth_required: bool = False) -> bytes:
 <footer>
   aitop {__version__} ·
   <a href="/api/snapshot">/api/snapshot</a> ·
+  <a href="/api/fleet">/api/fleet</a> ·
   <a href="/api/stream">/api/stream</a> ·
   <a href="/metrics">/metrics</a>
 </footer>
 <script>
 const AUTH_HINT = {auth_flag};
+const AUTH_ALL = {auth_all_flag};
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = "aitop.serve.token";
+const NODE_KEY = "aitop.serve.node";
+let fleet = [];
+let activeNode = localStorage.getItem(NODE_KEY) || "local";
+let es = null;
+
 const fmtBytes = (n) => {{
   if (n == null) return "—";
   const u = ["B","KB","MB","GB","TB"];
@@ -164,6 +179,12 @@ function authHeaders() {{
   const t = getToken();
   return t ? {{ "Authorization": "Bearer " + t, "Content-Type": "application/json" }}
            : {{ "Content-Type": "application/json" }};
+}}
+function withToken(path) {{
+  const t = getToken();
+  if (!t || !AUTH_ALL) return path;
+  const join = path.includes("?") ? "&" : "?";
+  return path + join + "token=" + encodeURIComponent(t);
 }}
 function toast(msg, err) {{
   const el = $("toast");
@@ -197,14 +218,37 @@ function meter(label, value, fraction, extra) {{
     <div class="sub">${{extra || ""}}</div></div>`;
 }}
 
+function renderNodes() {{
+  const nav = $("nodes");
+  if (fleet.length <= 1) {{
+    nav.hidden = true;
+    nav.innerHTML = "";
+    return;
+  }}
+  nav.hidden = false;
+  nav.innerHTML = fleet.map(s => {{
+    const name = s.node || "local";
+    const online = (s.engines || []).filter(e => e.state === "online").length;
+    const cls = name === activeNode ? "node active" : "node";
+    return `<button type="button" class="${{cls}}" data-node="${{esc(name)}}">${{esc(name)}} · ${{online}} rt</button>`;
+  }}).join("");
+}}
+
+function pickSnap() {{
+  if (!fleet.length) return null;
+  return fleet.find(s => (s.node || "local") === activeNode) || fleet[0];
+}}
+
 function render(snap) {{
+  if (!snap) return;
   const hw = snap.hardware || {{}};
   const cpu = hw.cpu || {{}};
   const mem = hw.memory || {{}};
   const gpus = hw.gpus || [];
   const host = (hw.host && hw.host.hostname) || snap.node || "local";
   const online = (snap.engines || []).filter(e => e.state === "online").length;
-  $("subtitle").textContent = `${{host}} · ${{online}} runtime(s) · ${{(snap.duration_ms||0).toFixed(0)}} ms · ${{new Date(snap.collected_at).toLocaleTimeString()}}`;
+  const fleetHint = fleet.length > 1 ? ` · fleet ${{fleet.length}}` : "";
+  $("subtitle").textContent = `${{host}} · ${{online}} runtime(s)${{fleetHint}} · ${{(snap.duration_ms||0).toFixed(0)}} ms · ${{new Date(snap.collected_at).toLocaleTimeString()}}`;
 
   let gpuHtml = "";
   if (!gpus.length) {{
@@ -276,9 +320,26 @@ function render(snap) {{
   }}).join("") || `<tr><td colspan="6" class="sub">no resident models</td></tr>`;
 }}
 
+function applyFleet(list) {{
+  if (!Array.isArray(list) || !list.length) return;
+  fleet = list;
+  if (!fleet.some(s => (s.node || "local") === activeNode)) {{
+    activeNode = fleet[0].node || "local";
+  }}
+  renderNodes();
+  render(pickSnap());
+}}
+
 document.body.addEventListener("click", async (ev) => {{
   const btn = ev.target.closest("button");
   if (!btn) return;
+  if (btn.dataset.node) {{
+    activeNode = btn.dataset.node;
+    localStorage.setItem(NODE_KEY, activeNode);
+    renderNodes();
+    render(pickSnap());
+    return;
+  }}
   if (btn.dataset.act) {{
     const kind = btn.dataset.kind;
     const act = btn.dataset.act;
@@ -299,28 +360,62 @@ document.body.addEventListener("click", async (ev) => {{
 $("save-token").addEventListener("click", () => {{
   localStorage.setItem(TOKEN_KEY, $("token").value || "");
   toast("token saved locally");
+  restartStream();
 }});
 $("token").value = localStorage.getItem(TOKEN_KEY) || "";
 if (AUTH_HINT) toast("this server may require a serve token for control");
+if (AUTH_ALL) toast("auth_all on — token also gates live stream (?token=)");
 
 async function pollOnce() {{
   const headers = {{}};
   const t = getToken();
   if (t) headers["Authorization"] = "Bearer " + t;
-  const r = await fetch("/api/snapshot", {{ headers }});
+  // Prefer fleet so multi-node configs surface; fall back to local snapshot.
+  let r = await fetch(withToken("/api/fleet"), {{ headers }});
+  if (r.status === 401) {{
+    toast("unauthorized — set serve token", true);
+    throw new Error("unauthorized");
+  }}
+  if (r.ok) {{
+    applyFleet(await r.json());
+    return;
+  }}
+  r = await fetch(withToken("/api/snapshot"), {{ headers }});
   if (!r.ok) throw new Error("snapshot " + r.status);
-  render(await r.json());
+  applyFleet([await r.json()]);
+}}
+
+function restartStream() {{
+  if (es) {{ try {{ es.close(); }} catch (_) {{}} es = null; }}
+  start();
 }}
 
 function start() {{
+  // Local SSE keeps the selected local node fresh; fleet poll covers remotes.
   if (window.EventSource) {{
-    const es = new EventSource("/api/stream");
-    es.onmessage = (ev) => {{ try {{ render(JSON.parse(ev.data)); }} catch (_) {{}} }};
-    es.onerror = () => {{ es.close(); setInterval(() => pollOnce().catch(()=>{{}}), 2000); pollOnce(); }};
-  }} else {{
-    pollOnce();
-    setInterval(() => pollOnce().catch(()=>{{}}), 2000);
+    es = new EventSource(withToken("/api/stream"));
+    es.onmessage = (ev) => {{
+      try {{
+        const snap = JSON.parse(ev.data);
+        const idx = fleet.findIndex(s => (s.node || "local") === (snap.node || "local"));
+        if (idx >= 0) fleet[idx] = snap;
+        else if (!fleet.length) fleet = [snap];
+        else if ((snap.node || "local") === "local") {{
+          const li = fleet.findIndex(s => (s.node || "local") === "local");
+          if (li >= 0) fleet[li] = snap; else fleet.unshift(snap);
+        }}
+        renderNodes();
+        render(pickSnap());
+      }} catch (_) {{}}
+    }};
+    es.onerror = () => {{
+      if (es) {{ es.close(); es = null; }}
+      setInterval(() => pollOnce().catch(()=>{{}}), 2000);
+      pollOnce().catch(()=>{{}});
+    }};
   }}
+  pollOnce().catch(()=>{{}});
+  setInterval(() => pollOnce().catch(()=>{{}}), 5000);
 }}
 start();
 </script>

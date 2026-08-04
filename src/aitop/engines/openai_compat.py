@@ -14,11 +14,11 @@ is typically loaded. Inference stats are best-effort from `/metrics`.
 
 from __future__ import annotations
 
-import re
 from typing import Any, ClassVar
 
 from aitop.engines.base import BaseEngine, EngineCapability
 from aitop.engines.lifecycle import restart_engine, start_engine, stop_engine
+from aitop.engines.stats import parse_prometheus_stats
 from aitop.models import (
     EngineKind,
     EngineSnapshot,
@@ -29,10 +29,13 @@ from aitop.models import (
 )
 from aitop.utils.parse import first, to_int
 
-_METRIC_LINE = re.compile(
-    r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)"
-    r"(?:\{(?P<labels>[^}]*)\})?\s+"
-    r"(?P<value>[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?\d+)?)\s*$"
+# Re-export for callers that imported the parser from this module.
+__all__ = (
+    "LlamaServerEngine",
+    "MLXEngine",
+    "OpenAICompatEngine",
+    "VLLMEngine",
+    "parse_prometheus_stats",
 )
 
 
@@ -189,8 +192,8 @@ class LlamaServerEngine(OpenAICompatEngine):
     display_name: ClassVar[str] = "llama-server"
     process_names: ClassVar[tuple[str, ...]] = ("llama-server", "llama_server")
     health_paths: ClassVar[tuple[str, ...]] = ("/health", "/v1/models")
-    # llama-server typically serves one model; listing implies residency.
-    metrics_path: ClassVar[str | None] = None
+    # Recent llama.cpp builds expose Prometheus at /metrics.
+    metrics_path: ClassVar[str | None] = "/metrics"
 
     async def _server_version(self) -> str | None:
         payload = await self._get_json("/props")
@@ -205,33 +208,6 @@ class MLXEngine(OpenAICompatEngine):
     process_names: ClassVar[tuple[str, ...]] = ("mlx_lm", "mlx-openai", "mlx_lm.server")
     health_paths: ClassVar[tuple[str, ...]] = ("/v1/models", "/health")
     metrics_path: ClassVar[str | None] = None
-
-
-def parse_prometheus_stats(text: str) -> InferenceStats:
-    """Extract a few useful gauges/counters from a Prometheus /metrics dump."""
-    values: dict[str, float] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = _METRIC_LINE.match(line)
-        if not match:
-            continue
-        values[match.group("name")] = float(match.group("value"))
-
-    tps = values.get("vllm:avg_generation_throughput_toks_per_s")
-    prompt_tps = values.get("vllm:avg_prompt_throughput_toks_per_s")
-    queue = values.get("vllm:num_requests_waiting")
-    active = values.get("vllm:num_requests_running")
-    total_raw = values.get("vllm:request_success_total")
-
-    return InferenceStats(
-        tokens_per_second=tps,
-        prompt_tokens_per_second=prompt_tps,
-        queue_depth=int(queue) if queue is not None else 0,
-        active_requests=int(active) if active is not None else 0,
-        total_requests=int(total_raw) if total_raw is not None else 0,
-    )
 
 
 def _data_array(payload: Any) -> list[dict[str, Any]]:

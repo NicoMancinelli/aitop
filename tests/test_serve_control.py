@@ -51,6 +51,9 @@ class FakeCollector:
     async def collect(self) -> SystemSnapshot:
         return SystemSnapshot(node="local")
 
+    async def collect_fleet(self) -> list[SystemSnapshot]:
+        return [await self.collect()]
+
     async def aclose(self) -> None:
         return None
 

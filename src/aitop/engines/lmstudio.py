@@ -15,11 +15,26 @@ version and for loaded-model detail the HTTP API omits.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, ClassVar
+
+import httpx
 
 from aitop.engines.base import BaseEngine, EngineCapability
 from aitop.engines.lifecycle import restart_engine, start_engine, stop_engine
-from aitop.models import EngineKind, EngineSnapshot, EngineState, LoadedModel, ModelInfo
+from aitop.engines.stats import (
+    STATS_PROBE_INTERVAL_S,
+    inference_stats_from_lmstudio,
+    parse_prometheus_stats,
+)
+from aitop.models import (
+    EngineKind,
+    EngineSnapshot,
+    EngineState,
+    InferenceStats,
+    LoadedModel,
+    ModelInfo,
+)
 from aitop.utils.parse import first, to_int
 from aitop.utils.proc import run, which
 
@@ -42,6 +57,11 @@ class LMStudioEngine(BaseEngine):
         }
     )
     process_names: ClassVar[tuple[str, ...]] = ("LM Studio", "lms", "lmstudio")
+
+    def __init__(self, endpoint, client=None) -> None:
+        super().__init__(endpoint, client)
+        self._last_stats = InferenceStats()
+        self._last_stats_mono = 0.0
 
     async def detect(self) -> bool:
         return (
@@ -81,8 +101,66 @@ class LMStudioEngine(BaseEngine):
             version=await self._cli_version(),
             models=sorted(models, key=lambda m: m.name),
             loaded=sorted(loaded, key=lambda m: m.name),
+            stats=await self._collect_stats(loaded),
             error=error,
         )
+
+    def _remember_stats(self, stats: InferenceStats) -> None:
+        if stats.tokens_per_second is None and stats.prompt_tokens_per_second is None:
+            return
+        self._last_stats = stats
+        self._last_stats_mono = time.monotonic()
+
+    async def _collect_stats(self, loaded: list[LoadedModel]) -> InferenceStats:
+        metrics = await self._try_prometheus_stats()
+        if (
+            metrics.tokens_per_second is not None
+            or metrics.prompt_tokens_per_second is not None
+        ):
+            self._remember_stats(metrics)
+            return metrics
+
+        now = time.monotonic()
+        due = (now - self._last_stats_mono) >= STATS_PROBE_INTERVAL_S
+        if loaded and due:
+            self._last_stats_mono = now
+            probed = await self._probe_chat_stats(loaded[0].id)
+            if probed.tokens_per_second is not None:
+                self._remember_stats(probed)
+                return probed
+
+        return self._last_stats
+
+    async def _try_prometheus_stats(self) -> InferenceStats:
+        url = f"{self.base_url}/metrics"
+        try:
+            response = await self.client.get(url)
+            if response.status_code >= 400:
+                return InferenceStats()
+            return parse_prometheus_stats(response.text)
+        except Exception:
+            return InferenceStats()
+
+    async def _probe_chat_stats(self, model_id: str) -> InferenceStats:
+        """One-token native chat completion — LM Studio returns `stats.tokens_per_second`."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/api/v0/chat/completions",
+                json={
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "."}],
+                    "max_tokens": 1,
+                    "stream": False,
+                },
+                timeout=httpx.Timeout(20.0, connect=3.0),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return InferenceStats()
+        if not isinstance(payload, dict):
+            return InferenceStats()
+        return inference_stats_from_lmstudio(payload)
 
     # -- parsing ------------------------------------------------------------ #
 

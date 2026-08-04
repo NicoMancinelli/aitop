@@ -7,6 +7,7 @@ aitop --json | jq .    # the raw SystemSnapshot
 aitop start|stop|…     # lifecycle control
 aitop pull MODEL       # pull a model into Ollama
 aitop models search q  # search the Hugging Face hub
+aitop models ingest ID # pull an HF repo into Ollama via hf.co/…
 aitop serve            # expose /api/snapshot for the fleet
 aitop update           # check for and install a newer release
 aitop doctor           # what aitop can and cannot see on this machine
@@ -29,7 +30,7 @@ from aitop import __version__
 from aitop.collector import SnapshotCollector
 from aitop.config import Config, config_path
 from aitop.engines.registry import EngineRegistry
-from aitop.hub import search_hub
+from aitop.hub import ollama_hub_ref, search_hub
 from aitop.models import DownloadProgress, EngineKind, SystemSnapshot
 from aitop.selfupdate import (
     REPO_URL,
@@ -192,11 +193,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     pull = subparsers.add_parser("pull", help="pull a model into a local engine")
     _add_common(pull)
-    pull.add_argument("model", help="model name, e.g. llama3.2:3b")
+    pull.add_argument(
+        "model",
+        help="model name (llama3.2:3b) or HF ref (hf.co/org/repo, or --hf org/repo)",
+    )
     pull.add_argument(
         "--engine",
         default="ollama",
         help="runtime to pull into (default: ollama)",
+    )
+    pull.add_argument(
+        "--hf",
+        action="store_true",
+        help="treat MODEL as a Hugging Face repo id and pull via hf.co/… (Ollama)",
     )
 
     metrics = subparsers.add_parser(
@@ -251,6 +260,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--loaded",
         action="store_true",
         help="only show models currently resident",
+    )
+    ingest = models_sub.add_parser(
+        "ingest",
+        help="pull a Hugging Face repo into Ollama via hf.co/…",
+    )
+    _add_common(ingest)
+    ingest.add_argument("model", help="HF repo id, e.g. bartowski/Llama-3.2-3B-Instruct-GGUF")
+    ingest.add_argument(
+        "--engine",
+        default="ollama",
+        help="runtime to pull into (default: ollama)",
     )
 
     delete = subparsers.add_parser("delete", help="remove a model from disk")
@@ -714,6 +734,13 @@ async def _run_pull(args: argparse.Namespace, config: Config, console: Console) 
             console.print(f"[yellow]{engine.name} does not support pull")
             return 1
 
+        model = args.model
+        if getattr(args, "hf", False) or model.startswith(
+            ("hf.co/", "huggingface.co/", "https://huggingface.co/", "http://huggingface.co/")
+        ):
+            model = ollama_hub_ref(model)
+            console.print(f"[dim]HF → Ollama ref[/] {model}")
+
         progress = Progress(
             TextColumn("[bold cyan]{task.description}"),
             BarColumn(),
@@ -728,16 +755,16 @@ async def _run_pull(args: argparse.Namespace, config: Config, console: Console) 
             total = tick.total_bytes or 0
             completed = tick.completed_bytes or 0
             if task_id is None:
-                task_id = progress.add_task(tick.status or args.model, total=total or None)
+                task_id = progress.add_task(tick.status or model, total=total or None)
             progress.update(
                 task_id,
-                description=tick.status or args.model,
+                description=tick.status or model,
                 completed=completed,
                 total=total or None,
             )
 
         with progress:
-            ok, message = await engine.pull(args.model, on_progress=on_progress)
+            ok, message = await engine.pull(model, on_progress=on_progress)
         console.print(f"[{'green' if ok else 'yellow'}]{message}")
         return 0 if ok else 1
     finally:
@@ -766,6 +793,10 @@ async def _run_models(args: argparse.Namespace, config: Config, console: Console
         return await _run_models_search(args, console)
     if args.models_command == "list":
         return await _run_models_list(args, config, console)
+    if args.models_command == "ingest":
+        # Reuse pull with HF mapping.
+        args.hf = True
+        return await _run_pull(args, config, console)
     console.print("[yellow]unknown models subcommand")
     return 1
 
@@ -791,9 +822,11 @@ async def _run_models_search(args: argparse.Namespace, console: Console) -> int:
             tags,
         )
     console.print(table)
+    ref = ollama_hub_ref(results[0].id)
     console.print(
-        "\n[dim]Pull into Ollama when a matching library tag exists:[/] "
-        f"aitop pull {results[0].id.split('/')[-1]}"
+        "\n[dim]Ingest into Ollama (GGUF repos):[/] "
+        f"aitop models ingest {results[0].id}\n"
+        f"[dim]or[/] aitop pull --hf {results[0].id}  [dim]→[/] {ref}"
     )
     return 0
 
