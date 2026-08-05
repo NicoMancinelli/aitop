@@ -93,10 +93,7 @@ class OllamaEngine(BaseEngine):
     async def _collect_stats(self, loaded: list[LoadedModel]) -> InferenceStats:
         """Prefer /metrics (when present), else cache / soft-probe generate."""
         metrics = await self._try_prometheus_stats()
-        if (
-            metrics.tokens_per_second is not None
-            or metrics.prompt_tokens_per_second is not None
-        ):
+        if metrics.tokens_per_second is not None or metrics.prompt_tokens_per_second is not None:
             self._remember_stats(metrics)
             return metrics
 

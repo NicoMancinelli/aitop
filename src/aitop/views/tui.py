@@ -898,8 +898,7 @@ class AiTopApp(App[None]):
             online = len(self.snapshot.online_engines)
             pause = " · PAUSED" if self.paused else ""
             self.sub_title = (
-                f"{host} · {online} online · "
-                f"{self.snapshot.duration_ms or 0:.0f} ms{pause}{filt}"
+                f"{host} · {online} online · {self.snapshot.duration_ms or 0:.0f} ms{pause}{filt}"
             )
         self.query_one("#catalog", DataTable).focus()
 

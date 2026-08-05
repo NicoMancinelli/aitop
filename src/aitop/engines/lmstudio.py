@@ -113,10 +113,7 @@ class LMStudioEngine(BaseEngine):
 
     async def _collect_stats(self, loaded: list[LoadedModel]) -> InferenceStats:
         metrics = await self._try_prometheus_stats()
-        if (
-            metrics.tokens_per_second is not None
-            or metrics.prompt_tokens_per_second is not None
-        ):
+        if metrics.tokens_per_second is not None or metrics.prompt_tokens_per_second is not None:
             self._remember_stats(metrics)
             return metrics
 
@@ -320,9 +317,7 @@ class LMStudioEngine(BaseEngine):
             from aitop.models import DownloadProgress, EngineKind
 
             on_progress(
-                DownloadProgress(
-                    model=model, engine=EngineKind.LMSTUDIO, status=f"lms get {model}"
-                )
+                DownloadProgress(model=model, engine=EngineKind.LMSTUDIO, status=f"lms get {model}")
             )
         result = await run("lms", "get", model, timeout=None)
         if result.ok:

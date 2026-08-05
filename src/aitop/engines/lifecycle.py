@@ -79,9 +79,7 @@ async def start_engine(
             return LifecycleResult(False, "docker not on PATH", "start", "docker")
         result = await run("docker", "start", container, timeout=30.0)
         if result.ok:
-            return LifecycleResult(
-                True, f"started container {container}", "start", "docker"
-            )
+            return LifecycleResult(True, f"started container {container}", "start", "docker")
         return LifecycleResult(False, result.reason, "start", "docker")
 
     argv = _START_BINARIES.get(kind)
@@ -210,9 +208,7 @@ async def restart_engine(
             return LifecycleResult(False, "docker not on PATH", "restart", "docker")
         result = await run("docker", "restart", container, timeout=90.0)
         if result.ok:
-            return LifecycleResult(
-                True, f"restarted container {container}", "restart", "docker"
-            )
+            return LifecycleResult(True, f"restarted container {container}", "restart", "docker")
         return LifecycleResult(False, result.reason, "restart", "docker")
 
     stopped = await stop_engine(kind, pid=pid, managed_by=managed, container=container)

@@ -216,19 +216,13 @@ class SnapshotServer:
                 path.startswith(p) and method != "GET" for p in _MUTATING_PREFIXES
             )
             # Control POSTs are always mutating; optionally gate all GETs.
-            needs_auth = mutating or (
-                self.auth_all and path not in _PUBLIC_GET and method == "GET"
-            )
-            if needs_auth and not self._authorized(
-                headers, mutating=True, query=query
-            ):
+            needs_auth = mutating or (self.auth_all and path not in _PUBLIC_GET and method == "GET")
+            if needs_auth and not self._authorized(headers, mutating=True, query=query):
                 await self._write(writer, 401, {"error": "unauthorized"})
                 return
 
             if method == "GET" and path == "/api/ws":
-                if self.auth_all and not self._authorized(
-                    headers, mutating=True, query=query
-                ):
+                if self.auth_all and not self._authorized(headers, mutating=True, query=query):
                     await self._write(writer, 401, {"error": "unauthorized"})
                     return
                 keep_open = await self._websocket(reader, writer, headers)
@@ -279,9 +273,7 @@ class SnapshotServer:
                 )
             elif path == "/api/fleet":
                 fleet = await self.collector.collect_fleet()
-                payload = json.dumps(
-                    [s.model_dump(mode="json") for s in fleet]
-                ).encode()
+                payload = json.dumps([s.model_dump(mode="json") for s in fleet]).encode()
                 await self._write_raw(
                     writer,
                     200,

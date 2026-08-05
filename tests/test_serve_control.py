@@ -42,9 +42,7 @@ class FakeEngine:
 
 class FakeCollector:
     def __init__(self, token: str | None = None, auth_all: bool = False):
-        self.config = Config(
-            fleet=FleetConfig(serve_token=token, serve_auth_all=auth_all)
-        )
+        self.config = Config(fleet=FleetConfig(serve_token=token, serve_auth_all=auth_all))
         self.node = "local"
         self.engines = type("R", (), {"engines": [FakeEngine()]})()
 

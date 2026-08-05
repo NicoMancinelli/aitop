@@ -51,12 +51,8 @@ def inference_stats_from_lmstudio(payload: dict[str, Any]) -> InferenceStats:
     stats = raw if isinstance(raw, dict) else {}
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
 
-    tps = to_float(
-        first(stats, "tokens_per_second", "generation_tps", "eval_tps", "tps")
-    )
-    prompt_tps = to_float(
-        first(stats, "prompt_tokens_per_second", "prompt_tps", "prompt_eval_tps")
-    )
+    tps = to_float(first(stats, "tokens_per_second", "generation_tps", "eval_tps", "tps"))
+    prompt_tps = to_float(first(stats, "prompt_tokens_per_second", "prompt_tps", "prompt_eval_tps"))
     ttft = to_float(
         first(
             stats,
