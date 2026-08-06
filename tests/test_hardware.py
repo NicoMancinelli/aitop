@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from aitop.hardware.amd import AMDProbe, _to_snapshot
@@ -184,6 +186,88 @@ async def test_amd_probe_handles_non_json(monkeypatch):
     result = await AMDProbe().probe()
     assert result.gpus == []
     assert "non-JSON" in result.degraded[0]
+
+
+# --------------------------------------------------------------------------- #
+# Intel / xpu-smi parsing
+# --------------------------------------------------------------------------- #
+
+
+async def test_intel_probe_parses_discovery_and_dump(monkeypatch):
+    from aitop.hardware.intel import IntelProbe
+
+    async def fake_run(*argv, **kwargs):
+        if "discovery" in argv and "-j" in argv and "-d" not in argv:
+            return CommandResult(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "device_list": [
+                            {
+                                "device_id": 0,
+                                "device_name": "Intel(R) Arc(TM) B580 Graphics",
+                                "device_type": "GPU",
+                                "vendor_name": "Intel(R) Corporation",
+                            }
+                        ]
+                    }
+                ),
+                "",
+            )
+        if "discovery" in argv and "-d" in argv:
+            return CommandResult(
+                argv,
+                0,
+                json.dumps({"device_id": 0, "memory_physical_size_mb": 12216.0}),
+                "",
+            )
+        if "dump" in argv:
+            return CommandResult(
+                argv,
+                0,
+                "2026-01-01 00:00:00.000, 0, 41.5, 88.0, 52.0, 4096.0\n",
+                "",
+            )
+        return CommandResult(argv, 1, "", "unexpected")
+
+    monkeypatch.setattr("aitop.hardware.intel.run", fake_run)
+    monkeypatch.setattr("aitop.hardware.intel.which", lambda name: "/usr/bin/xpu-smi")
+
+    probe = IntelProbe()
+    assert await probe.available()
+    result = await probe.probe()
+    assert len(result.gpus) == 1
+    gpu = result.gpus[0]
+    assert gpu.vendor is Vendor.INTEL
+    assert "Arc" in gpu.name
+    assert gpu.utilization_percent == pytest.approx(41.5)
+    assert gpu.power_watts == pytest.approx(88.0)
+    assert gpu.temperature_c == pytest.approx(52.0)
+    assert gpu.vram_used_bytes == 4096 * 1024 * 1024
+    assert gpu.vram_total_bytes == int(12216 * 1024 * 1024)
+    assert result.total_power_watts == pytest.approx(88.0)
+
+
+async def test_intel_probe_csv_discovery_fallback(monkeypatch):
+    from aitop.hardware.intel import IntelProbe
+
+    async def fake_run(*argv, **kwargs):
+        if "discovery" in argv and "-j" in argv:
+            return CommandResult(argv, 1, "", "no json")
+        if "discovery" in argv and "--dump" in argv:
+            return CommandResult(argv, 0, "0, Intel Graphics, 8192.00\n", "")
+        if "dump" in argv:
+            return CommandResult(argv, 0, "0, 12.0, 40.0, 45.0, 1024.0\n", "")
+        return CommandResult(argv, 1, "", "nope")
+
+    monkeypatch.setattr("aitop.hardware.intel.run", fake_run)
+    probe = IntelProbe()
+    probe._bin = "xpu-smi"
+    result = await probe.probe()
+    assert len(result.gpus) == 1
+    assert result.gpus[0].name == "Intel Graphics"
+    assert result.gpus[0].vram_total_bytes == 8192 * 1024 * 1024
 
 
 # --------------------------------------------------------------------------- #

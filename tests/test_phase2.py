@@ -87,10 +87,12 @@ async def test_vllm_online_with_metrics(vllm_endpoint):
 
 @respx.mock
 async def test_llama_server_online(llama_endpoint):
+    respx.get(f"{LLAMA}/models").mock(httpx.Response(404))
     respx.get(f"{LLAMA}/v1/models").mock(
         httpx.Response(200, json={"data": [{"id": "qwen2.5-7b", "object": "model"}]})
     )
     respx.get(f"{LLAMA}/props").mock(httpx.Response(200, json={"version": "b1234"}))
+    respx.get(f"{LLAMA}/metrics").mock(httpx.Response(404))
 
     engine = LlamaServerEngine(llama_endpoint)
     snapshot = await engine.poll()
@@ -99,6 +101,48 @@ async def test_llama_server_online(llama_endpoint):
     assert snapshot.state is EngineState.ONLINE
     assert snapshot.version == "b1234"
     assert snapshot.loaded[0].id == "qwen2.5-7b"
+    assert engine.supports("load")
+    assert engine.supports("unload")
+
+
+@respx.mock
+async def test_llama_server_router_load_unload(llama_endpoint):
+    respx.get(f"{LLAMA}/models").mock(
+        httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "qwen-a", "status": "loaded"},
+                    {"id": "qwen-b", "status": "unloaded"},
+                ]
+            },
+        )
+    )
+    respx.get(f"{LLAMA}/props").mock(httpx.Response(200, json={"version": "router"}))
+    respx.get(f"{LLAMA}/metrics").mock(httpx.Response(404))
+    respx.post(f"{LLAMA}/models/load").mock(httpx.Response(200, json={"ok": True}))
+    respx.post(f"{LLAMA}/models/unload").mock(httpx.Response(200, json={"ok": True}))
+
+    engine = LlamaServerEngine(llama_endpoint)
+    snap = await engine.poll()
+    assert [m.id for m in snap.models] == ["qwen-a", "qwen-b"]
+    assert [m.id for m in snap.loaded] == ["qwen-a"]
+
+    ok, message = await engine.load("qwen-b")
+    assert ok and "loaded" in message
+    ok, message = await engine.unload("qwen-a")
+    assert ok and "unloaded" in message
+    await engine.aclose()
+
+
+@respx.mock
+async def test_llama_server_load_explains_missing_router(llama_endpoint):
+    respx.post(f"{LLAMA}/models/load").mock(httpx.Response(404))
+    engine = LlamaServerEngine(llama_endpoint)
+    ok, message = await engine.load("anything")
+    await engine.aclose()
+    assert not ok
+    assert "router" in message.lower()
 
 
 @respx.mock

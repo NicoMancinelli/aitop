@@ -212,13 +212,14 @@ aitop/
 │   ├── stats.py         InferenceStats parsers (Ollama generate, LM Studio, Prometheus)
 │   ├── ollama.py        /api/version, /api/tags, /api/ps, pull, load, unload, delete, rebind
 │   ├── lmstudio.py      /api/v0/models, /v1/models fallback, `lms` CLI hooks
-│   └── openai_compat.py vLLM, llama-server, MLX OpenAI-compatible adapters
+│   └── openai_compat.py vLLM, llama-server (router load/unload), MLX adapters
 ├── hardware/
 │   ├── base.py          HardwareProbe ABC + ProbeResult (degrades, never raises)
 │   ├── system.py        psutil CPU/memory/host, sysctl P+E core split
 │   ├── apple.py         ioreg (no root) + system_profiler + powermetrics (root)
 │   ├── nvidia.py        nvidia-smi CSV query
 │   ├── amd.py           rocm-smi --json
+│   ├── intel.py         xpu-smi discovery + dump (Arc / Flex / Max)
 │   └── collector.py     Probe selection and concurrent assembly
 ├── net/tailscale.py     tailscale status --json
 ├── selfupdate.py        Install-method detection, release lookup, in-place upgrade
