@@ -221,6 +221,7 @@ aitop/
 │   ├── apple.py         ioreg (no root) + system_profiler + powermetrics (root)
 │   ├── nvidia.py        nvidia-smi CSV query
 │   ├── amd.py           rocm-smi --json
+│   ├── intel.py         xpu-smi (Arc / Data Center) or intel_gpu_top
 │   └── collector.py     Probe selection and concurrent assembly
 ├── net/tailscale.py     tailscale status --json
 ├── selfupdate.py        Install-method detection, release lookup, in-place upgrade
@@ -239,7 +240,7 @@ changes to the collectors. `aitop serve` is that subscriber for the fleet.
 
 Every hardware probe reports what it *couldn't* read instead of failing:
 
-- `nvidia-smi` / `rocm-smi` missing → the probe is never activated
+- `nvidia-smi` / `rocm-smi` / `xpu-smi` / `intel_gpu_top` missing → the probe is never activated
 - `powermetrics` would prompt for a password → skipped, noted under **Notes**
 - Apple `iogpu.wired_limit_mb` unset → the GPU memory ceiling is estimated from
   Metal's `recommendedMaxWorkingSetSize` ratios, and labelled as an estimate
@@ -295,6 +296,7 @@ endpoints:
 | Apple Silicon | ✅ (P/E split) | ✅ unified | ✅ util + wired limit | root only | root only |
 | Linux + NVIDIA | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Linux + AMD ROCm | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Linux + Intel (Arc / Xe) | ✅ | ✅ | ✅ (`xpu-smi` or `intel_gpu_top`) | ✅ when exposed | ✅ when exposed |
 
 ## Development
 

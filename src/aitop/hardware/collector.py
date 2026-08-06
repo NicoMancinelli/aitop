@@ -15,13 +15,19 @@ import psutil
 from aitop.hardware.amd import AMDProbe
 from aitop.hardware.apple import AppleSiliconProbe
 from aitop.hardware.base import HardwareProbe, ProbeResult
+from aitop.hardware.intel import IntelProbe
 from aitop.hardware.nvidia import NvidiaProbe
 from aitop.hardware.system import collect_cpu, collect_host, collect_memory
 from aitop.models import HardwareSnapshot
 
 log = logging.getLogger(__name__)
 
-ALL_PROBES: tuple[type[HardwareProbe], ...] = (AppleSiliconProbe, NvidiaProbe, AMDProbe)
+ALL_PROBES: tuple[type[HardwareProbe], ...] = (
+    AppleSiliconProbe,
+    NvidiaProbe,
+    AMDProbe,
+    IntelProbe,
+)
 
 
 class HardwareCollector:
@@ -79,7 +85,10 @@ class HardwareCollector:
             merged.merge(result)
 
         if not merged.gpus:
-            merged.note("no GPU telemetry source found (nvidia-smi / rocm-smi / Apple GPU)")
+            merged.note(
+                "no GPU telemetry source found "
+                "(nvidia-smi / rocm-smi / xpu-smi / intel_gpu_top / Apple GPU)"
+            )
 
         return HardwareSnapshot(
             host=host,

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from aitop.hardware.amd import AMDProbe, _to_snapshot
 from aitop.hardware.apple import _metal_family, _parse_powermetrics
 from aitop.hardware.base import HardwareProbe, ProbeResult
 from aitop.hardware.collector import HardwareCollector
+from aitop.hardware.intel import IntelProbe, _loads_json, _parse_intel_gpu_top_json
 from aitop.hardware.nvidia import NvidiaProbe
 from aitop.hardware.system import collect_cpu, collect_host, collect_memory
 from aitop.models import Vendor
@@ -184,6 +187,160 @@ async def test_amd_probe_handles_non_json(monkeypatch):
     result = await AMDProbe().probe()
     assert result.gpus == []
     assert "non-JSON" in result.degraded[0]
+
+
+# --------------------------------------------------------------------------- #
+# Intel parsing
+# --------------------------------------------------------------------------- #
+
+
+XPU_DISCOVERY = {
+    "device_list": [
+        {
+            "device_id": 0,
+            "device_name": "Intel(R) Arc(TM) B580 Graphics",
+            "device_type": "GPU",
+            "pci_bdf_address": "0000:03:00.0",
+            "vendor_name": "Intel(R) Corporation",
+        }
+    ]
+}
+
+XPU_DETAIL = {
+    "device_id": 0,
+    "device_name": "Intel(R) Arc(TM) B580 Graphics",
+    "driver_version": "9FF4708B",
+    "memory_physical_size_byte": "12809363456",
+    "number_of_eus": "160",
+}
+
+XPU_STATS = {
+    "device_id": 0,
+    "gpu_utilization": "37.5",
+    "GPU Power (W)": "95.2",
+    "GPU Core Temperature (C)": "61",
+    "GPU Memory Used (MiB)": "4096",
+    "GPU Memory Util (%)": "33.5",
+}
+
+IGT_SAMPLE = [
+    {
+        "period": {"duration": 100.0, "unit": "ms"},
+        "frequency": {"actual": 1300.0, "unit": "MHz"},
+        "power": {"GPU": 4.5, "Package": 18.0, "unit": "W"},
+        "engines": {
+            "Render/3D/0": {"busy": 42.5, "unit": "%"},
+            "Blitter/0": {"busy": 1.0, "unit": "%"},
+            "Video/0": {"busy": 0.0, "unit": "%"},
+        },
+    }
+]
+
+
+async def test_intel_xpu_smi_probe(monkeypatch):
+    async def fake_run(*argv, **kwargs):
+        cmd = " ".join(argv)
+        if cmd == "xpu-smi discovery -j":
+            return CommandResult(argv, 0, json.dumps(XPU_DISCOVERY), "")
+        if "discovery" in argv and "-d" in argv and "-j" in argv:
+            return CommandResult(argv, 0, json.dumps(XPU_DETAIL), "")
+        if "stats" in argv and "-j" in argv:
+            return CommandResult(argv, 0, json.dumps(XPU_STATS), "")
+        return CommandResult(argv, 1, "", "unexpected")
+
+    monkeypatch.setattr(
+        "aitop.hardware.intel.which",
+        lambda name: "/usr/bin/xpu-smi" if name == "xpu-smi" else None,
+    )
+    monkeypatch.setattr("aitop.hardware.intel.run", fake_run)
+
+    result = await IntelProbe().probe()
+    assert len(result.gpus) == 1
+    gpu = result.gpus[0]
+    assert gpu.vendor is Vendor.INTEL
+    assert gpu.name.startswith("Intel(R) Arc")
+    assert gpu.driver_version == "9FF4708B"
+    assert gpu.api_version == "Level Zero"
+    assert gpu.core_count == 160
+    assert gpu.utilization_percent == pytest.approx(37.5)
+    assert gpu.vram_total_bytes == 12809363456
+    assert gpu.vram_used_bytes == 4096 * 1024 * 1024
+    assert gpu.temperature_c == pytest.approx(61)
+    assert gpu.power_watts == pytest.approx(95.2)
+    assert result.total_power_watts == pytest.approx(95.2)
+
+
+async def test_intel_xpu_smi_table_fallback(monkeypatch):
+    table = """\
++-----------+------------------+
+| Device ID | Device Information |
++-----------+------------------+
+| 0         | Device Name: Intel(R) Graphics [0x56c0]
+|           | Driver Version: 16929133
+|           | Memory Physical Size: 14336.00 MiB
+|           | Number of EUs: 512
++-----------+------------------+
+| GPU Power (W) | 15 |
+| Average % utilization of all GPU Engines | 12 |
+| GPU Core Temperature (C) | 41 |
+| GPU Memory Used (MiB) | 24 |
+"""
+
+    async def fake_run(*argv, **kwargs):
+        if argv[-1] == "-j" and "discovery" in argv and "-d" not in argv:
+            return CommandResult(argv, 0, json.dumps(XPU_DISCOVERY), "")
+        if "-j" in argv:
+            return CommandResult(argv, 1, "", "no json")
+        if "discovery" in argv or "stats" in argv:
+            return CommandResult(argv, 0, table, "")
+        return CommandResult(argv, 1, "", "nope")
+
+    monkeypatch.setattr(
+        "aitop.hardware.intel.which",
+        lambda name: "/usr/bin/xpu-smi" if name == "xpu-smi" else None,
+    )
+    monkeypatch.setattr("aitop.hardware.intel.run", fake_run)
+
+    result = await IntelProbe().probe()
+    gpu = result.gpus[0]
+    assert gpu.vram_total_bytes == int(14336 * 1024 * 1024)
+    assert gpu.utilization_percent == pytest.approx(12)
+    assert gpu.power_watts == pytest.approx(15)
+    assert gpu.temperature_c == pytest.approx(41)
+
+
+async def test_intel_gpu_top_probe(monkeypatch):
+    async def fake_run(*argv, **kwargs):
+        return CommandResult(argv, 0, json.dumps(IGT_SAMPLE), "")
+
+    monkeypatch.setattr(
+        "aitop.hardware.intel.which",
+        lambda name: "/usr/bin/intel_gpu_top" if name == "intel_gpu_top" else None,
+    )
+    monkeypatch.setattr("aitop.hardware.intel.run", fake_run)
+
+    result = await IntelProbe().probe()
+    assert len(result.gpus) == 1
+    gpu = result.gpus[0]
+    assert gpu.vendor is Vendor.INTEL
+    assert gpu.utilization_percent == pytest.approx(42.5)
+    assert gpu.power_watts == pytest.approx(4.5)
+    assert gpu.unified_memory is True
+    assert result.total_power_watts == pytest.approx(4.5)
+
+
+async def test_intel_probe_unavailable_without_tools(monkeypatch):
+    monkeypatch.setattr("aitop.hardware.intel.which", lambda _name: None)
+    assert await IntelProbe().available() is False
+
+
+def test_parse_intel_gpu_top_tolerates_truncated_array():
+    # Full array missing closing bracket — common when the tool is killed.
+    text = "[" + json.dumps(IGT_SAMPLE[0])
+    samples = _parse_intel_gpu_top_json(text)
+    assert len(samples) == 1
+    assert samples[0]["engines"]
+    assert _loads_json("{not json") is None
 
 
 # --------------------------------------------------------------------------- #

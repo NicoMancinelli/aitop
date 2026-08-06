@@ -1,7 +1,7 @@
 """Hardware probe contract.
 
 Probes wrap platform-specific tools (`powermetrics`, `ioreg`, `nvidia-smi`,
-`rocm-smi`). Two rules hold everywhere:
+`rocm-smi`, `xpu-smi`, `intel_gpu_top`). Two rules hold everywhere:
 
 * `available()` is cheap and side-effect free — it decides whether the probe
   is even applicable on this box.
