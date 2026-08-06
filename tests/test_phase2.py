@@ -323,3 +323,145 @@ async def test_mlx_engine():
     await engine.aclose()
     assert snapshot.state is EngineState.ONLINE
     assert snapshot.models[0].id.startswith("mlx-community")
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI-compat load / unload
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+async def test_llama_server_router_load_unload(llama_endpoint):
+    respx.get(f"{LLAMA}/models").mock(
+        httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "qwen2.5-7b",
+                        "status": {"value": "loaded"},
+                    },
+                    {
+                        "id": "gemma-3",
+                        "status": {"value": "unloaded"},
+                    },
+                ]
+            },
+        )
+    )
+    respx.get(f"{LLAMA}/props").mock(httpx.Response(200, json={"version": "b9999"}))
+    respx.get(f"{LLAMA}/metrics").mock(httpx.Response(404))
+    load_route = respx.post(f"{LLAMA}/models/load").mock(
+        httpx.Response(200, json={"success": True})
+    )
+    unload_route = respx.post(f"{LLAMA}/models/unload").mock(
+        httpx.Response(200, json={"success": True})
+    )
+
+    engine = LlamaServerEngine(llama_endpoint)
+    assert engine.supports("load") and engine.supports("unload")
+
+    snap = await engine.poll()
+    assert [m.id for m in snap.models] == ["gemma-3", "qwen2.5-7b"]
+    assert [m.id for m in snap.loaded] == ["qwen2.5-7b"]
+
+    ok, message = await engine.load("gemma-3")
+    assert ok and "loaded gemma-3" in message
+    assert load_route.called
+    assert load_route.calls.last.request.content == b'{"model":"gemma-3"}'
+
+    ok, message = await engine.unload("qwen2.5-7b")
+    assert ok and "unloaded" in message
+    assert unload_route.called
+
+    await engine.aclose()
+
+
+@respx.mock
+async def test_llama_server_load_falls_back_to_warm(llama_endpoint):
+    respx.post(f"{LLAMA}/models/load").mock(httpx.Response(404))
+    warm = respx.post(f"{LLAMA}/v1/completions").mock(
+        httpx.Response(200, json={"choices": [{"text": "."}]})
+    )
+
+    engine = LlamaServerEngine(llama_endpoint)
+    ok, message = await engine.load("qwen2.5-7b")
+    await engine.aclose()
+
+    assert ok
+    assert "loaded qwen2.5-7b" in message
+    assert warm.called
+
+
+@respx.mock
+async def test_llama_server_unload_without_router(llama_endpoint):
+    respx.post(f"{LLAMA}/models/unload").mock(httpx.Response(404))
+    respx.get(f"{LLAMA}/models").mock(httpx.Response(404))
+    respx.get(f"{LLAMA}/v1/models").mock(httpx.Response(200, json={"data": [{"id": "solo"}]}))
+    respx.get(f"{LLAMA}/props").mock(httpx.Response(200, json={"version": "b1"}))
+
+    engine = LlamaServerEngine(llama_endpoint)
+    ok, message = await engine.unload()
+    await engine.aclose()
+
+    assert not ok
+    assert "router mode" in message
+
+
+@respx.mock
+async def test_vllm_load_wake_and_unload_sleep(vllm_endpoint):
+    wake = respx.post(f"{VLLM}/wake_up").mock(httpx.Response(200, content=b"ok"))
+    sleep = respx.post(f"{VLLM}/sleep").mock(httpx.Response(200, content=b"ok"))
+
+    engine = VLLMEngine(vllm_endpoint)
+    assert engine.supports("load") and engine.supports("unload")
+
+    ok, message = await engine.load("meta-llama/Llama-3.1-8B-Instruct")
+    assert ok and "woke" in message
+    assert wake.called
+
+    ok, message = await engine.unload()
+    assert ok and "sleep" in message
+    assert sleep.called
+    assert sleep.calls.last.request.url.params.get("level") == "1"
+
+    await engine.aclose()
+
+
+@respx.mock
+async def test_vllm_lora_load_unload(vllm_endpoint):
+    respx.post(f"{VLLM}/wake_up").mock(httpx.Response(404))
+    load = respx.post(f"{VLLM}/v1/load_lora_adapter").mock(httpx.Response(200, content=b"Success"))
+    unload = respx.post(f"{VLLM}/v1/unload_lora_adapter").mock(
+        httpx.Response(200, content=b"Success")
+    )
+
+    engine = VLLMEngine(vllm_endpoint)
+    ok, message = await engine.load("sql=/models/sql-lora")
+    assert ok and "LoRA sql" in message
+    assert b'"lora_name":"sql"' in load.calls.last.request.content
+
+    ok, message = await engine.unload("sql")
+    assert ok and "LoRA sql" in message
+    assert unload.called
+
+    await engine.aclose()
+
+
+@respx.mock
+async def test_mlx_warm_load():
+    ep = EndpointConfig(kind=EngineKind.MLX, host="127.0.0.1", port=8080)
+    respx.post("http://127.0.0.1:8080/v1/completions").mock(httpx.Response(404))
+    chat = respx.post("http://127.0.0.1:8080/v1/chat/completions").mock(
+        httpx.Response(200, json={"choices": [{"message": {"content": "."}}]})
+    )
+
+    engine = MLXEngine(ep)
+    assert engine.supports("load")
+    assert not engine.supports("unload")
+
+    ok, message = await engine.load("mlx-community/Llama-3.2-1B")
+    await engine.aclose()
+
+    assert ok and "loaded" in message
+    assert chat.called

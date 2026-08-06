@@ -143,6 +143,8 @@ aitop restart lmstudio
 aitop load ollama llama3.2      # warm a model into memory
 aitop unload ollama             # evict all resident weights
 aitop unload ollama llama3.2    # evict one model
+aitop load llama-server qwen    # router /models/load (or warm)
+aitop unload vllm               # sleep mode when enabled; else LoRA name
 aitop rebind ollama 0.0.0.0     # restart bound to a new host
 aitop rebind ollama tailscale   # use this node's Tailscale IPv4
 ```
@@ -212,7 +214,7 @@ aitop/
 │   ├── stats.py         InferenceStats parsers (Ollama generate, LM Studio, Prometheus)
 │   ├── ollama.py        /api/version, /api/tags, /api/ps, pull, load, unload, delete, rebind
 │   ├── lmstudio.py      /api/v0/models, /v1/models fallback, `lms` CLI hooks
-│   └── openai_compat.py vLLM, llama-server, MLX OpenAI-compatible adapters
+│   └── openai_compat.py vLLM, llama-server, MLX — load/unload where APIs allow
 ├── hardware/
 │   ├── base.py          HardwareProbe ABC + ProbeResult (degrades, never raises)
 │   ├── system.py        psutil CPU/memory/host, sysctl P+E core split
@@ -284,9 +286,9 @@ endpoints:
 |-----------|:------:|:------:|:---------:|:----:|:------:|:------:|:---------:|:----:|
 | Ollama    | ✅ | ✅ | ✅ (incl. GPU offload %) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | LM Studio | ✅ | ✅ | ✅ (native API or `lms`)  | ✅ (`lms`) | ✅ (`lms`) | ✅ (`lms remove`) | ✅ | ✅ (`lms get`) |
-| vLLM      | ✅ | ✅ | ✅ (listed = loaded) | — | — | — | ✅ | — |
-| llama-server | ✅ | ✅ | ✅ | — | — | — | ✅ | — |
-| MLX       | ✅ | ✅ | ✅ | — | — | — | ✅ | — |
+| vLLM      | ✅ | ✅ | ✅ (listed = loaded) | ✅ (wake / LoRA / warm) | ✅ (sleep / LoRA) | — | ✅ | — |
+| llama-server | ✅ | ✅ | ✅ (router status) | ✅ (router or warm) | ✅ (router) | — | ✅ | — |
+| MLX       | ✅ | ✅ | ✅ | ✅ (warm) | — | — | ✅ | — |
 
 | Platform | CPU | Memory | GPU | Power | Thermals |
 |----------|:---:|:------:|:---:|:-----:|:--------:|
