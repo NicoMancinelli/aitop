@@ -54,6 +54,7 @@ async def start_engine(
     managed_by: str | None = None,
     host: str = "127.0.0.1",
     port: int | None = None,
+    container: str | None = None,
 ) -> LifecycleResult:
     """Bring a local engine up via supervisor or its CLI."""
     managed = managed_by or await _guess_supervisor(kind)
@@ -67,9 +68,19 @@ async def start_engine(
         if result.ok:
             return LifecycleResult(True, f"started {kind} via launchd", "start", "launchd")
     if managed == "docker":
-        return LifecycleResult(
-            False, f"{kind}: docker start needs an explicit container name", "start", "docker"
-        )
+        if not container:
+            return LifecycleResult(
+                False,
+                f"{kind}: docker start needs endpoints[].container in config",
+                "start",
+                "docker",
+            )
+        if which("docker") is None:
+            return LifecycleResult(False, "docker not on PATH", "start", "docker")
+        result = await run("docker", "start", container, timeout=30.0)
+        if result.ok:
+            return LifecycleResult(True, f"started container {container}", "start", "docker")
+        return LifecycleResult(False, result.reason, "start", "docker")
 
     argv = _START_BINARIES.get(kind)
     if not argv or which(argv[0]) is None:
@@ -115,6 +126,7 @@ async def stop_engine(
     *,
     pid: int | None = None,
     managed_by: str | None = None,
+    container: str | None = None,
 ) -> LifecycleResult:
     """Stop a local engine via supervisor, docker, or SIGTERM."""
     managed = managed_by or await _guess_supervisor(kind)
@@ -131,14 +143,20 @@ async def stop_engine(
         if result.ok:
             return LifecycleResult(True, f"stopped {kind} via launchd", "stop", "launchd")
 
-    if managed == "docker" and pid is not None:
-        # Best-effort: map PID → container is unreliable; refuse rather than guess.
-        return LifecycleResult(
-            False,
-            f"{kind}: docker-managed — stop the container explicitly",
-            "stop",
-            "docker",
-        )
+    if managed == "docker":
+        if not container:
+            return LifecycleResult(
+                False,
+                f"{kind}: docker-managed — set endpoints[].container in config",
+                "stop",
+                "docker",
+            )
+        if which("docker") is None:
+            return LifecycleResult(False, "docker not on PATH", "stop", "docker")
+        result = await run("docker", "stop", container, timeout=60.0)
+        if result.ok:
+            return LifecycleResult(True, f"stopped container {container}", "stop", "docker")
+        return LifecycleResult(False, result.reason, "stop", "docker")
 
     if kind == "lmstudio" and which("lms") is not None:
         result = await run("lms", "server", "stop", timeout=15.0)
@@ -171,6 +189,7 @@ async def restart_engine(
     managed_by: str | None = None,
     host: str = "127.0.0.1",
     port: int | None = None,
+    container: str | None = None,
 ) -> LifecycleResult:
     managed = managed_by or await _guess_supervisor(kind)
 
@@ -184,15 +203,24 @@ async def restart_engine(
         if result.ok:
             return LifecycleResult(True, f"restarted {kind} via launchd", "restart", "launchd")
 
-    stopped = await stop_engine(kind, pid=pid, managed_by=managed)
+    if managed == "docker" and container:
+        if which("docker") is None:
+            return LifecycleResult(False, "docker not on PATH", "restart", "docker")
+        result = await run("docker", "restart", container, timeout=90.0)
+        if result.ok:
+            return LifecycleResult(True, f"restarted container {container}", "restart", "docker")
+        return LifecycleResult(False, result.reason, "restart", "docker")
+
+    stopped = await stop_engine(kind, pid=pid, managed_by=managed, container=container)
     if not stopped.ok and "already gone" not in stopped.message:
-        # Still attempt start — the process may have been down already.
         log.debug("stop before restart: %s", stopped.message)
 
     import asyncio
 
     await asyncio.sleep(0.4)
-    started = await start_engine(kind, managed_by=managed, host=host, port=port)
+    started = await start_engine(
+        kind, managed_by=managed, host=host, port=port, container=container
+    )
     if started.ok:
         return LifecycleResult(True, f"restarted {kind}", "restart", started.managed_by)
     return LifecycleResult(False, started.message, "restart", managed)

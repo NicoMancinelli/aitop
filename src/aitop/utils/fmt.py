@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from rich.text import Text
+
 _UNITS = ("B", "KB", "MB", "GB", "TB", "PB")
 
 
@@ -88,6 +90,44 @@ def heat_color(fraction: float | None) -> str:
     if fraction < 0.85:
         return "yellow"
     return "red"
+
+
+def sparkline(values: list[float], width: int = 24, *, loft: float = 100.0) -> str:
+    """Compact Unicode sparkline. Values are scaled against `loft` (or the max)."""
+    if width <= 0:
+        return ""
+    if not values:
+        return " " * width
+    window = values[-width:]
+    if len(window) < width:
+        window = [0.0] * (width - len(window)) + window
+    peak = max(loft, max(window) if window else 0.0, 1.0)
+    chars = " ▁▂▃▄▅▆▇█"
+    out: list[str] = []
+    for value in window:
+        idx = int(max(0.0, min(1.0, value / peak)) * (len(chars) - 1))
+        out.append(chars[idx])
+    return "".join(out)
+
+
+def core_bars(per_core: list[float], *, width: int = 4, cols: int = 8) -> Text:
+    """Compact per-core utilisation grid as a Rich Text.
+
+    Each core is a short heat-coloured bar. Arranged into `cols` columns so a
+    16-core box still fits a metric panel.
+    """
+    out = Text()
+    if not per_core:
+        out.append("—", style="dim")
+        return out
+    for i, load in enumerate(per_core):
+        if i and i % cols == 0:
+            out.append("\n")
+        elif i:
+            out.append(" ")
+        frac = max(0.0, min(1.0, load / 100.0))
+        out.append(ratio_bar(frac, width=width), style=heat_color(frac))
+    return out
 
 
 def truncate(text: str, width: int) -> str:

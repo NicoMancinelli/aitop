@@ -47,6 +47,8 @@ class EndpointConfig(BaseModel):
     remote: bool = False
     api_key: str | None = None
     timeout: float = 2.0
+    container: str | None = None
+    """Docker container name when the runtime is managed by Docker."""
 
     def resolved_port(self) -> int:
         return self.port or DEFAULT_PORTS.get(self.kind, 8080)
@@ -117,6 +119,8 @@ class FleetNodeConfig(BaseModel):
     url: str
     enabled: bool = True
     timeout: float = 3.0
+    token: str | None = None
+    """Bearer token for a peer that requires `Authorization` on /api/snapshot."""
 
 
 class FleetConfig(BaseModel):
@@ -127,6 +131,12 @@ class FleetConfig(BaseModel):
 
     serve_host: str = "127.0.0.1"
     serve_port: int = 9090
+    serve_token: str | None = None
+    """When set, mutating control endpoints (and optionally all routes) require
+    `Authorization: Bearer <token>` or `X-Aitop-Token`."""
+
+    serve_auth_all: bool = False
+    """If true and `serve_token` is set, protect every route except `/healthz`."""
 
 
 class Config(BaseModel):

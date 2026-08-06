@@ -112,12 +112,35 @@ aitop doctor           # what telemetry is available on this machine, and what i
 aitop update           # upgrade in place
 ```
 
+### TUI keys
+
+| Key | Action |
+|-----|--------|
+| `?` | help overlay |
+| `space` | pause / resume live refresh |
+| `1` `2` `3` | jump to Engines / Catalog / Loaded |
+| `tab` | cycle focus |
+| `/` | filter catalog (name / quant / runtime) |
+| `o` | cycle catalog sort (name → size → state) |
+| `s` / `e` / `x` | start / restart / stop selected engine |
+| `l` | load model (picker, or catalog selection) |
+| `u` | unload selected resident model |
+| `d` | delete catalog model from disk |
+| `p` | pull a model into the selected engine |
+| `a` | toggle offline engines |
+| `r` | force refresh |
+| `esc` | clear catalog filter |
+| `q` | quit |
+
+The status strip shows Tailscale peers, hardware probe warnings, and snapshot age while paused. Cursor selection fills the detail strip (pid, managed-by, errors, format, VRAM).
+
 ### Lifecycle
 
 ```bash
 aitop start ollama              # bring a runtime up (systemd / launchd / CLI)
 aitop stop ollama
 aitop restart lmstudio
+aitop load ollama llama3.2      # warm a model into memory
 aitop unload ollama             # evict all resident weights
 aitop unload ollama llama3.2    # evict one model
 aitop rebind ollama 0.0.0.0     # restart bound to a new host
@@ -127,19 +150,37 @@ aitop rebind ollama tailscale   # use this node's Tailscale IPv4
 ### Models
 
 ```bash
+aitop models list               # models known to reachable engines (● = resident)
+aitop models list --loaded      # only what's in memory right now
 aitop pull llama3.2:3b          # stream an Ollama pull with a progress bar
+aitop pull --hf org/model-GGUF  # pull a Hugging Face GGUF repo via hf.co/…
+aitop models ingest org/model-GGUF
+aitop delete ollama old-model   # remove a model from disk
 aitop models search qwen2.5     # search the Hugging Face hub (GGUF by default)
 aitop models search mlx-llama --tag mlx
 ```
 
-### Fleet
+### Fleet & metrics
 
 ```bash
-aitop serve                     # expose /api/snapshot + /api/stream (default :9090)
+aitop serve                     # live UI + API (open http://127.0.0.1:9090/ui)
 aitop serve --host 0.0.0.0 -p 9090
+aitop serve --token change-me   # require Bearer token on control POSTs
+aitop serve --token change-me --auth-all   # also protect GET snapshot/stream
 aitop fleet                     # render local + configured remote snapshots
 aitop fleet --json              # machine-readable array of SystemSnapshots
+aitop metrics                   # one-shot Prometheus exposition (stdout)
+aitop config init               # write a starter ~/.config/aitop/config.yaml
 ```
+
+The web UI at `/ui` can start/stop/restart engines and load/unload/delete models
+via `POST /api/engines/…` and `POST /api/models/…`. When `--token` (or
+`fleet.serve_token`) is set, those POSTs need `Authorization: Bearer <token>`
+(or `X-Aitop-Token`). Paste the token into the header field on `/ui` — it is
+stored in `localStorage` only. With `--auth-all`, reads are gated too; the live
+EventSource uses `?token=` because browsers cannot set SSE headers. `GET /api/fleet`
+returns local + configured peer snapshots for the multi-node switcher on `/ui`
+and the TUI Fleet tab (`n` / `]` to cycle nodes).
 
 `aitop doctor` is the first thing to run when something looks wrong — it reports the
 install method, which config file was loaded, which hardware probes activated, and
@@ -161,13 +202,15 @@ aitop/
 ├── bus.py               Async pub/sub; bounded, drop-oldest queues per subscriber
 ├── collector.py         Fans out to hardware + engines + tailscale, emits a snapshot
 ├── config.py            Zero-config defaults, optional ~/.config/aitop/config.yaml
-├── hub.py               Hugging Face model search (no huggingface_hub dependency)
-├── serve.py             Stdlib HTTP gateway: /api/snapshot + SSE /api/stream
+├── hub.py               Hugging Face model search + hf.co pull ref mapping
+├── prometheus.py        SystemSnapshot → Prometheus text exposition
+├── serve.py             Stdlib HTTP gateway: /ui + snapshot + fleet + SSE + WS + /metrics + control API
 ├── engines/
-│   ├── base.py          BaseEngine ABC: detect / poll / start / stop / unload / rebind / pull
+│   ├── base.py          BaseEngine ABC: detect / poll / start / stop / load / unload / delete / pull
 │   ├── lifecycle.py     systemd / launchd / docker / manual process control
 │   ├── registry.py      Endpoint probing + psutil process scan, all concurrent
-│   ├── ollama.py        /api/version, /api/tags, /api/ps, pull, unload, rebind
+│   ├── stats.py         InferenceStats parsers (Ollama generate, LM Studio, Prometheus)
+│   ├── ollama.py        /api/version, /api/tags, /api/ps, pull, load, unload, delete, rebind
 │   ├── lmstudio.py      /api/v0/models, /v1/models fallback, `lms` CLI hooks
 │   └── openai_compat.py vLLM, llama-server, MLX OpenAI-compatible adapters
 ├── hardware/
@@ -181,12 +224,14 @@ aitop/
 ├── selfupdate.py        Install-method detection, release lookup, in-place upgrade
 ├── views/neofetch.py    Pure function of a SystemSnapshot → Rich renderable
 ├── views/tui.py         Textual btop-style live dashboard (bus subscriber)
+├── views/web.py         Embedded HTML live dashboard for `aitop serve /ui`
 └── cli.py               argparse entrypoint
 ```
 
-`SystemSnapshot` is fully JSON-serializable by design. A web UI, the Prometheus
-exporter, and remote fleet streaming are all "add a bus subscriber" — no changes
-to the collectors. `aitop serve` is that subscriber for the fleet.
+`SystemSnapshot` is fully JSON-serializable by design. The Textual TUI, the
+embedded web UI, the Prometheus exporter (`aitop metrics` / `GET /metrics`), and
+remote fleet streaming (SSE + WebSocket) are all "add a bus subscriber" — no
+changes to the collectors. `aitop serve` is that subscriber for the fleet.
 
 ### Graceful degradation
 
@@ -215,9 +260,11 @@ ui:
 fleet:
   serve_host: 127.0.0.1
   serve_port: 9090
+  # serve_token: change-me
   nodes:
     - name: pveclaw
       url: http://100.100.1.7:9090
+      # token: change-me
 
 endpoints:
   - kind: ollama
@@ -225,19 +272,21 @@ endpoints:
     port: 11434
     name: pveclaw-ollama
     remote: true
+  - kind: ollama
+    container: ollama      # docker start/stop/restart by name
   - kind: lmstudio
     enabled: false         # never probe LM Studio on this box
 ```
 
 ## Supported today
 
-| Runtime   | Detect | Models | Residency | Unload | Lifecycle | Pull |
-|-----------|:------:|:------:|:---------:|:------:|:---------:|:----:|
-| Ollama    | ✅ | ✅ | ✅ (incl. GPU offload %) | ✅ | ✅ | ✅ |
-| LM Studio | ✅ | ✅ | ✅ (native API or `lms`)  | ✅ (`lms`) | ✅ | — |
-| vLLM      | ✅ | ✅ | ✅ (listed = loaded) | — | ✅ | — |
-| llama-server | ✅ | ✅ | ✅ | — | ✅ | — |
-| MLX       | ✅ | ✅ | ✅ | — | ✅ | — |
+| Runtime   | Detect | Models | Residency | Load | Unload | Delete | Lifecycle | Pull |
+|-----------|:------:|:------:|:---------:|:----:|:------:|:------:|:---------:|:----:|
+| Ollama    | ✅ | ✅ | ✅ (incl. GPU offload %) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| LM Studio | ✅ | ✅ | ✅ (native API or `lms`)  | ✅ (`lms`) | ✅ (`lms`) | ✅ (`lms remove`) | ✅ | ✅ (`lms get`) |
+| vLLM      | ✅ | ✅ | ✅ (listed = loaded) | — | — | — | ✅ | — |
+| llama-server | ✅ | ✅ | ✅ | — | — | — | ✅ | — |
+| MLX       | ✅ | ✅ | ✅ | — | — | — | ✅ | — |
 
 | Platform | CPU | Memory | GPU | Power | Thermals |
 |----------|:---:|:------:|:---:|:-----:|:--------:|

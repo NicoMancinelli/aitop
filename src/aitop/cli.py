@@ -7,6 +7,7 @@ aitop --json | jq .    # the raw SystemSnapshot
 aitop start|stop|…     # lifecycle control
 aitop pull MODEL       # pull a model into Ollama
 aitop models search q  # search the Hugging Face hub
+aitop models ingest ID # pull an HF repo into Ollama via hf.co/…
 aitop serve            # expose /api/snapshot for the fleet
 aitop update           # check for and install a newer release
 aitop doctor           # what aitop can and cannot see on this machine
@@ -29,7 +30,7 @@ from aitop import __version__
 from aitop.collector import SnapshotCollector
 from aitop.config import Config, config_path
 from aitop.engines.registry import EngineRegistry
-from aitop.hub import search_hub
+from aitop.hub import ollama_hub_ref, search_hub
 from aitop.models import DownloadProgress, EngineKind, SystemSnapshot
 from aitop.selfupdate import (
     REPO_URL,
@@ -57,8 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
             "  aitop tui              live btop-style TUI\n"
             "  aitop --json | jq .    machine-readable snapshot\n"
             "  aitop unload ollama    evict resident Ollama weights\n"
+            "  aitop load ollama m     warm a model into memory\n"
             "  aitop pull llama3.2    pull a model into Ollama\n"
+            "  aitop metrics           Prometheus text exposition\n"
             "  aitop serve            expose this node to the fleet\n"
+            "  aitop config init       write a starter config.yaml\n"
             "  aitop update           upgrade to the latest release\n"
             "  aitop doctor           show what telemetry is available here\n"
         ),
@@ -133,6 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="never invoke sudo helpers such as powermetrics",
     )
+    serve.add_argument(
+        "--token",
+        default=None,
+        help="bearer token for control API (or AITOP_SERVE_TOKEN / fleet.serve_token)",
+    )
+    serve.add_argument(
+        "--auth-all",
+        action="store_true",
+        help="require the token on all routes except /healthz",
+    )
 
     fleet = subparsers.add_parser(
         "fleet",
@@ -164,6 +178,11 @@ def build_parser() -> argparse.ArgumentParser:
     unload.add_argument("engine", help="runtime kind or endpoint name")
     unload.add_argument("model", nargs="?", default=None, help="model id (default: all)")
 
+    load = subparsers.add_parser("load", help="warm a model into memory/VRAM")
+    _add_common(load)
+    load.add_argument("engine", help="runtime kind or endpoint name")
+    load.add_argument("model", help="model id to load")
+
     rebind = subparsers.add_parser(
         "rebind",
         help="rebind an engine to a new host (e.g. Tailscale IP)",
@@ -174,11 +193,47 @@ def build_parser() -> argparse.ArgumentParser:
 
     pull = subparsers.add_parser("pull", help="pull a model into a local engine")
     _add_common(pull)
-    pull.add_argument("model", help="model name, e.g. llama3.2:3b")
+    pull.add_argument(
+        "model",
+        help="model name (llama3.2:3b) or HF ref (hf.co/org/repo, or --hf org/repo)",
+    )
     pull.add_argument(
         "--engine",
         default="ollama",
         help="runtime to pull into (default: ollama)",
+    )
+    pull.add_argument(
+        "--hf",
+        action="store_true",
+        help="treat MODEL as a Hugging Face repo id and pull via hf.co/… (Ollama)",
+    )
+
+    metrics = subparsers.add_parser(
+        "metrics",
+        help="emit a Prometheus text exposition of the current snapshot",
+    )
+    _add_common(metrics)
+    metrics.add_argument(
+        "--no-privileged",
+        action="store_true",
+        help="never invoke sudo helpers such as powermetrics",
+    )
+
+    cfg = subparsers.add_parser("config", help="config file helpers")
+    _add_common(cfg)
+    cfg_sub = cfg.add_subparsers(dest="config_command", required=True)
+    init_cfg = cfg_sub.add_parser("init", help="write a starter config.yaml")
+    _add_common(init_cfg)
+    init_cfg.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing config file",
+    )
+    init_cfg.add_argument(
+        "--path",
+        type=Path,
+        default=None,
+        help=f"destination path (default: {config_path()})",
     )
 
     models = subparsers.add_parser("models", help="model hub helpers")
@@ -193,6 +248,35 @@ def build_parser() -> argparse.ArgumentParser:
         default="gguf",
         help="HF filter tag (default: gguf; pass '' for none)",
     )
+    list_models = models_sub.add_parser("list", help="list models known to local engines")
+    _add_common(list_models)
+    list_models.add_argument(
+        "--engine",
+        default=None,
+        help="limit to one runtime kind (ollama, lmstudio, …)",
+    )
+    list_models.add_argument("--json", action="store_true", help="emit JSON")
+    list_models.add_argument(
+        "--loaded",
+        action="store_true",
+        help="only show models currently resident",
+    )
+    ingest = models_sub.add_parser(
+        "ingest",
+        help="pull a Hugging Face repo into Ollama via hf.co/…",
+    )
+    _add_common(ingest)
+    ingest.add_argument("model", help="HF repo id, e.g. bartowski/Llama-3.2-3B-Instruct-GGUF")
+    ingest.add_argument(
+        "--engine",
+        default="ollama",
+        help="runtime to pull into (default: ollama)",
+    )
+
+    delete = subparsers.add_parser("delete", help="remove a model from disk")
+    _add_common(delete)
+    delete.add_argument("engine", help="runtime kind (currently: ollama)")
+    delete.add_argument("model", help="model id to delete")
 
     return parser
 
@@ -274,10 +358,18 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_run_lifecycle(args, config, console))
             case "unload":
                 return asyncio.run(_run_unload(args, config, console))
+            case "load":
+                return asyncio.run(_run_load(args, config, console))
+            case "delete":
+                return asyncio.run(_run_delete(args, config, console))
             case "rebind":
                 return asyncio.run(_run_rebind(args, config, console))
             case "pull":
                 return asyncio.run(_run_pull(args, config, console))
+            case "metrics":
+                return asyncio.run(_run_metrics(args, config, console))
+            case "config":
+                return _run_config(args, console)
             case "models":
                 return asyncio.run(_run_models(args, config, console))
             case _:
@@ -394,17 +486,27 @@ def _run_tui(args: argparse.Namespace, config: Config) -> int:
 
 
 async def _run_serve(args: argparse.Namespace, config: Config, console: Console) -> int:
+    import os
+
     host = args.host or config.fleet.serve_host
     port = args.port or config.fleet.serve_port
+    token = args.token or os.environ.get("AITOP_SERVE_TOKEN") or config.fleet.serve_token
     collector = SnapshotCollector(config, allow_privileged=not args.no_privileged)
     server = SnapshotServer(
         collector,
         host=host,
         port=port,
         interval=args.interval,
+        token=token,
+        auth_all=bool(args.auth_all) or config.fleet.serve_auth_all,
     )
-    console.print(f"[bold]aitop serve[/] http://{host}:{port}")
-    console.print("[dim]/healthz  /api/snapshot  /api/stream[/]")
+    console.print(f"[bold]aitop serve[/] http://{host}:{port}/ui")
+    console.print(
+        "[dim]/ui  /healthz  /api/snapshot  /api/stream  /api/ws  /metrics  "
+        "POST /api/engines/…  POST /api/models/…[/]"
+    )
+    if token:
+        console.print("[dim]control endpoints require Authorization: Bearer <token>[/]")
     try:
         await server.run()
     finally:
@@ -514,6 +616,87 @@ async def _run_unload(args: argparse.Namespace, config: Config, console: Console
         await registry.aclose()
 
 
+async def _run_load(args: argparse.Namespace, config: Config, console: Console) -> int:
+    engine, registry, err = await _resolve_engine(config, args.engine)
+    try:
+        if err or engine is None:
+            console.print(f"[yellow]{err}")
+            return 1
+        if not engine.supports("load"):
+            console.print(f"[yellow]{engine.name} does not support load")
+            return 1
+        console.print(f"[cyan]loading {args.model} on {engine.name}…")
+        ok, message = await engine.load(args.model)
+        console.print(f"[{'green' if ok else 'yellow'}]{message}")
+        return 0 if ok else 1
+    finally:
+        await registry.aclose()
+
+
+async def _run_metrics(args: argparse.Namespace, config: Config, console: Console) -> int:
+    from aitop.prometheus import render_prometheus
+
+    collector = SnapshotCollector(config, allow_privileged=not args.no_privileged)
+    try:
+        snapshot = await collector.collect()
+        # Prometheus scrapers expect plain text on stdout — no Rich markup.
+        sys.stdout.write(render_prometheus(snapshot))
+        return 0
+    finally:
+        await collector.aclose()
+
+
+_SAMPLE_CONFIG = """\
+# aitop config — generated by `aitop config init`
+# Docs: https://github.com/NicoMancinelli/aitop
+
+polling:
+  hardware_interval: 2.0
+  engine_interval: 2.0
+
+ui:
+  show_per_core: true
+
+updates:
+  check: true
+  auto_apply: false
+
+fleet:
+  serve_host: 127.0.0.1
+  serve_port: 9090
+  # serve_token: change-me          # require Bearer token on control POSTs
+  # serve_auth_all: false           # also protect GET /api/snapshot etc.
+  # nodes:
+  #   - name: pveclaw
+  #     url: http://100.100.1.7:9090
+  #     token: change-me
+
+# endpoints:
+#   - kind: ollama
+#     host: 100.100.1.7
+#     name: pveclaw-ollama
+#     remote: true
+#   - kind: ollama
+#     container: ollama              # docker start/stop/restart by name
+#   - kind: lmstudio
+#     enabled: false
+"""
+
+
+def _run_config(args: argparse.Namespace, console: Console) -> int:
+    if args.config_command != "init":
+        console.print("[yellow]unknown config subcommand")
+        return 1
+    path = args.path or config_path()
+    if path.exists() and not args.force:
+        console.print(f"[yellow]{path} already exists — pass --force to overwrite")
+        return 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_SAMPLE_CONFIG)
+    console.print(f"[green]wrote {path}")
+    return 0
+
+
 async def _run_rebind(args: argparse.Namespace, config: Config, console: Console) -> int:
     engine, registry, err = await _resolve_engine(config, args.engine)
     try:
@@ -551,6 +734,13 @@ async def _run_pull(args: argparse.Namespace, config: Config, console: Console) 
             console.print(f"[yellow]{engine.name} does not support pull")
             return 1
 
+        model = args.model
+        if getattr(args, "hf", False) or model.startswith(
+            ("hf.co/", "huggingface.co/", "https://huggingface.co/", "http://huggingface.co/")
+        ):
+            model = ollama_hub_ref(model)
+            console.print(f"[dim]HF → Ollama ref[/] {model}")
+
         progress = Progress(
             TextColumn("[bold cyan]{task.description}"),
             BarColumn(),
@@ -565,16 +755,33 @@ async def _run_pull(args: argparse.Namespace, config: Config, console: Console) 
             total = tick.total_bytes or 0
             completed = tick.completed_bytes or 0
             if task_id is None:
-                task_id = progress.add_task(tick.status or args.model, total=total or None)
+                task_id = progress.add_task(tick.status or model, total=total or None)
             progress.update(
                 task_id,
-                description=tick.status or args.model,
+                description=tick.status or model,
                 completed=completed,
                 total=total or None,
             )
 
         with progress:
-            ok, message = await engine.pull(args.model, on_progress=on_progress)
+            ok, message = await engine.pull(model, on_progress=on_progress)
+        console.print(f"[{'green' if ok else 'yellow'}]{message}")
+        return 0 if ok else 1
+    finally:
+        await registry.aclose()
+
+
+async def _run_delete(args: argparse.Namespace, config: Config, console: Console) -> int:
+    engine, registry, err = await _resolve_engine(config, args.engine)
+    try:
+        if err or engine is None:
+            console.print(f"[yellow]{err}")
+            return 1
+        if not engine.supports("delete"):
+            console.print(f"[yellow]{engine.name} does not support delete")
+            return 1
+        console.print(f"[cyan]deleting {args.model} from {engine.name}…")
+        ok, message = await engine.delete(args.model)
         console.print(f"[{'green' if ok else 'yellow'}]{message}")
         return 0 if ok else 1
     finally:
@@ -582,9 +789,19 @@ async def _run_pull(args: argparse.Namespace, config: Config, console: Console) 
 
 
 async def _run_models(args: argparse.Namespace, config: Config, console: Console) -> int:
-    if args.models_command != "search":
-        console.print("[yellow]unknown models subcommand")
-        return 1
+    if args.models_command == "search":
+        return await _run_models_search(args, console)
+    if args.models_command == "list":
+        return await _run_models_list(args, config, console)
+    if args.models_command == "ingest":
+        # Reuse pull with HF mapping.
+        args.hf = True
+        return await _run_pull(args, config, console)
+    console.print("[yellow]unknown models subcommand")
+    return 1
+
+
+async def _run_models_search(args: argparse.Namespace, console: Console) -> int:
     tag = args.tag or None
     results = await search_hub(args.query, limit=args.limit, filter_tag=tag)
     if not results:
@@ -605,10 +822,76 @@ async def _run_models(args: argparse.Namespace, config: Config, console: Console
             tags,
         )
     console.print(table)
+    ref = ollama_hub_ref(results[0].id)
     console.print(
-        "\n[dim]Pull into Ollama when a matching library tag exists:[/] "
-        f"aitop pull {results[0].id.split('/')[-1]}"
+        "\n[dim]Ingest into Ollama (GGUF repos):[/] "
+        f"aitop models ingest {results[0].id}\n"
+        f"[dim]or[/] aitop pull --hf {results[0].id}  [dim]→[/] {ref}"
     )
+    return 0
+
+
+async def _run_models_list(args: argparse.Namespace, config: Config, console: Console) -> int:
+    from aitop.utils.fmt import bytes_human
+
+    collector = SnapshotCollector(config, allow_privileged=True)
+    try:
+        snapshot = await collector.collect()
+    finally:
+        await collector.aclose()
+
+    engines = snapshot.online_engines
+    if args.engine:
+        engines = [e for e in engines if e.kind.value == args.engine.lower()]
+
+    rows: list[dict] = []
+    for eng in engines:
+        loaded_ids = {m.id for m in eng.loaded}
+        source = eng.loaded if args.loaded else eng.models
+        for model in source:
+            rows.append(
+                {
+                    "id": model.id,
+                    "name": model.name,
+                    "engine": eng.kind.value,
+                    "runtime": eng.name,
+                    "size_bytes": model.size_bytes,
+                    "quantization": model.quantization,
+                    "parameter_size": model.parameter_size,
+                    "loaded": model.id in loaded_ids,
+                }
+            )
+
+    if args.json:
+        import json
+
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    if not rows:
+        console.print("[yellow]no models found on reachable engines")
+        return 1
+
+    table = Table(box=None, pad_edge=False, padding=(0, 2))
+    table.add_column("", width=1)
+    table.add_column("MODEL", style="bold")
+    table.add_column("RUNTIME")
+    table.add_column("PARAMS", justify="right")
+    table.add_column("QUANT")
+    table.add_column("SIZE", justify="right")
+    for row in sorted(rows, key=lambda r: (r["engine"], r["name"])):
+        mark = "●" if row["loaded"] else "○"
+        style = "green" if row["loaded"] else "dim"
+        table.add_row(
+            f"[{style}]{mark}[/]",
+            row["name"],
+            row["runtime"],
+            row["parameter_size"] or "—",
+            row["quantization"] or "—",
+            bytes_human(row["size_bytes"]),
+        )
+    console.print(table)
+    console.print("[dim]● resident  ○ on disk[/]")
     return 0
 
 

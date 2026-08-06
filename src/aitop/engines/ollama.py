@@ -13,16 +13,25 @@ panel visualises.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any, ClassVar
 
+import httpx
+
 from aitop.engines.base import BaseEngine, EngineCapability
 from aitop.engines.lifecycle import restart_engine, start_engine, stop_engine
+from aitop.engines.stats import (
+    STATS_PROBE_INTERVAL_S,
+    inference_stats_from_ollama,
+    parse_prometheus_stats,
+)
 from aitop.models import (
     DownloadProgress,
     EngineKind,
     EngineSnapshot,
     EngineState,
+    InferenceStats,
     LoadedModel,
     ModelInfo,
 )
@@ -38,12 +47,19 @@ class OllamaEngine(BaseEngine):
             EngineCapability.LIST_MODELS,
             EngineCapability.LIST_LOADED,
             EngineCapability.UNLOAD,
+            EngineCapability.LOAD,
             EngineCapability.PULL,
+            EngineCapability.DELETE,
             EngineCapability.LIFECYCLE,
             EngineCapability.REBIND,
         }
     )
     process_names: ClassVar[tuple[str, ...]] = ("ollama",)
+
+    def __init__(self, endpoint, client=None) -> None:
+        super().__init__(endpoint, client)
+        self._last_stats = InferenceStats()
+        self._last_stats_mono = 0.0
 
     async def detect(self) -> bool:
         return await self._get_json("/api/version") is not None
@@ -56,15 +72,73 @@ class OllamaEngine(BaseEngine):
         version = first(version_payload, "version")
         tags = await self._get_json("/api/tags")
         ps = await self._get_json("/api/ps")
+        loaded = self._parse_loaded(ps)
 
         degraded = tags is None or ps is None
         return self.snapshot(
             state=EngineState.DEGRADED if degraded else EngineState.ONLINE,
             version=version,
             models=self._parse_models(tags),
-            loaded=self._parse_loaded(ps),
+            loaded=loaded,
+            stats=await self._collect_stats(loaded),
             error="one or more telemetry endpoints did not respond" if degraded else None,
         )
+
+    def _remember_stats(self, stats: InferenceStats) -> None:
+        if stats.tokens_per_second is None and stats.prompt_tokens_per_second is None:
+            return
+        self._last_stats = stats
+        self._last_stats_mono = time.monotonic()
+
+    async def _collect_stats(self, loaded: list[LoadedModel]) -> InferenceStats:
+        """Prefer /metrics (when present), else cache / soft-probe generate."""
+        metrics = await self._try_prometheus_stats()
+        if metrics.tokens_per_second is not None or metrics.prompt_tokens_per_second is not None:
+            self._remember_stats(metrics)
+            return metrics
+
+        now = time.monotonic()
+        due = (now - self._last_stats_mono) >= STATS_PROBE_INTERVAL_S
+        if loaded and due:
+            # Advance the clock even on failure so we don't probe every poll tick.
+            self._last_stats_mono = now
+            probed = await self._probe_generate_stats(loaded[0].id)
+            if probed.tokens_per_second is not None:
+                self._remember_stats(probed)
+                return probed
+
+        return self._last_stats
+
+    async def _try_prometheus_stats(self) -> InferenceStats:
+        url = f"{self.base_url}/metrics"
+        try:
+            response = await self.client.get(url)
+            if response.status_code >= 400:
+                return InferenceStats()
+            return parse_prometheus_stats(response.text)
+        except Exception:
+            return InferenceStats()
+
+    async def _probe_generate_stats(self, model_id: str) -> InferenceStats:
+        """One-token generate to sample tok/s without changing keep-alive."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": model_id,
+                    "prompt": ".",
+                    "stream": False,
+                    "options": {"num_predict": 1},
+                },
+                timeout=httpx.Timeout(20.0, connect=3.0),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return InferenceStats()
+        if not isinstance(payload, dict):
+            return InferenceStats()
+        return inference_stats_from_ollama(payload)
 
     # -- parsing ------------------------------------------------------------ #
 
@@ -136,17 +210,68 @@ class OllamaEngine(BaseEngine):
             return False, "failed to unload: " + ", ".join(failed)
         return True, f"unloaded {len(targets)} model(s)"
 
+    async def load(self, model_id: str) -> tuple[bool, str]:
+        """Warm a model into memory with a keep-alive generate request."""
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": model_id,
+                    "prompt": ".",
+                    "stream": False,
+                    "keep_alive": "30m",
+                    "options": {"num_predict": 1},
+                },
+                timeout=httpx.Timeout(120.0, connect=5.0),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict):
+                self._remember_stats(inference_stats_from_ollama(payload))
+        except Exception as exc:
+            return False, f"load failed: {type(exc).__name__}: {exc}"
+        return True, f"loaded {model_id}"
+
+    async def delete(self, model_id: str) -> tuple[bool, str]:
+        """`DELETE /api/delete` removes a model from disk."""
+        try:
+            response = await self.client.request(
+                "DELETE",
+                f"{self.base_url}/api/delete",
+                json={"model": model_id},
+            )
+            # Older Ollamas used POST /api/delete.
+            if response.status_code == 404:
+                response = await self.client.post(
+                    f"{self.base_url}/api/delete",
+                    json={"name": model_id},
+                )
+            response.raise_for_status()
+        except Exception as exc:
+            return False, f"delete failed: {type(exc).__name__}: {exc}"
+        return True, f"deleted {model_id}"
+
     async def start(self) -> tuple[bool, str]:
         if self.endpoint.remote:
             return False, "cannot start a remote engine"
-        result = await start_engine("ollama", host=self.host, port=self.port)
+        result = await start_engine(
+            "ollama",
+            host=self.host,
+            port=self.port,
+            container=self.endpoint.container,
+        )
         return result.ok, result.message
 
     async def stop(self) -> tuple[bool, str]:
         if self.endpoint.remote:
             return False, "cannot stop a remote engine"
         snap = await self.poll()
-        result = await stop_engine("ollama", pid=snap.pid, managed_by=snap.managed_by)
+        result = await stop_engine(
+            "ollama",
+            pid=snap.pid,
+            managed_by=snap.managed_by,
+            container=self.endpoint.container,
+        )
         return result.ok, result.message
 
     async def restart(self) -> tuple[bool, str]:
@@ -159,6 +284,7 @@ class OllamaEngine(BaseEngine):
             managed_by=snap.managed_by,
             host=self.host,
             port=self.port,
+            container=self.endpoint.container,
         )
         return result.ok, result.message
 
@@ -170,7 +296,12 @@ class OllamaEngine(BaseEngine):
 
         new_host, new_port = split_host_port(host, self.port)
         snap = await self.poll()
-        stopped = await stop_engine("ollama", pid=snap.pid, managed_by=snap.managed_by)
+        stopped = await stop_engine(
+            "ollama",
+            pid=snap.pid,
+            managed_by=snap.managed_by,
+            container=self.endpoint.container,
+        )
         if not stopped.ok and "already gone" not in stopped.message:
             return False, f"rebind stop failed: {stopped.message}"
 
@@ -182,6 +313,7 @@ class OllamaEngine(BaseEngine):
             managed_by=snap.managed_by if snap.managed_by != "systemd" else "manual",
             host=new_host,
             port=new_port,
+            container=self.endpoint.container,
         )
         if not started.ok:
             return False, (

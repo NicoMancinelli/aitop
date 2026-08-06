@@ -1,9 +1,9 @@
 """Serializable telemetry contract shared by every aitop consumer.
 
 Everything the backend produces is a pydantic model in this module. The TUI,
-the (future) web UI, the Prometheus exporter and the remote-fleet WebSocket
-stream all speak this schema and nothing else — no renderer ever touches a
-subprocess or an HTTP client directly.
+the TUI, Prometheus exporter (`aitop metrics` / `GET /metrics`), and remote
+fleet stream all speak this schema and nothing else — no renderer ever touches
+a subprocess or an HTTP client directly.
 """
 
 from __future__ import annotations

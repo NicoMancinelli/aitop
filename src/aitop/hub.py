@@ -22,6 +22,24 @@ HF_API = "https://huggingface.co/api/models"
 _USER_AGENT = "aitop/0.2"
 
 
+def ollama_hub_ref(model_id: str) -> str:
+    """Map a Hugging Face repo id (or URL) to an Ollama `hf.co/…` pull ref.
+
+    Ollama can pull GGUF repos directly via the `hf.co/` namespace. Plain
+    library tags (`llama3.2:3b`) are returned unchanged.
+    """
+    mid = model_id.strip().removeprefix("https://").removeprefix("http://")
+    if mid.startswith("huggingface.co/"):
+        mid = "hf.co/" + mid[len("huggingface.co/") :]
+    if mid.startswith("hf.co/"):
+        return mid.rstrip("/")
+    # Bare `org/repo` — only when it looks like a hub id (has a slash, no `:tag`
+    # ollama-library shape). Callers pass `--hf` / `models ingest` for this path.
+    if "/" in mid and ":" not in mid.split("/", 1)[0]:
+        return f"hf.co/{mid.rstrip('/')}"
+    return mid
+
+
 async def search_hub(
     query: str,
     *,

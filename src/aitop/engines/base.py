@@ -42,6 +42,8 @@ class EngineCapability:
     LIST_MODELS = "list_models"
     LIST_LOADED = "list_loaded"
     UNLOAD = "unload"
+    LOAD = "load"
+    DELETE = "delete"
     LIFECYCLE = "lifecycle"
     REBIND = "rebind"
     PULL = "pull"
@@ -167,7 +169,7 @@ class BaseEngine(abc.ABC):
     def offline(self, error: str | None = None) -> EngineSnapshot:
         return self.snapshot(state=EngineState.OFFLINE, error=error)
 
-    # -- control surface (Phase 2 — declared now so the UI can bind to it) -- #
+    # -- control surface ---------------------------------------------------- #
 
     async def start(self) -> tuple[bool, str]:
         return False, f"{self.display_name}: start not implemented"
@@ -181,6 +183,14 @@ class BaseEngine(abc.ABC):
     async def unload(self, model_id: str | None = None) -> tuple[bool, str]:
         """Evict resident weights and flush KV cache. `None` means all models."""
         return False, f"{self.display_name}: unload not implemented"
+
+    async def load(self, model_id: str) -> tuple[bool, str]:
+        """Bring a model into memory/VRAM so the next request is warm."""
+        return False, f"{self.display_name}: load not implemented"
+
+    async def delete(self, model_id: str) -> tuple[bool, str]:
+        """Remove a model from disk."""
+        return False, f"{self.display_name}: delete not implemented"
 
     async def rebind(self, host: str) -> tuple[bool, str]:
         return False, f"{self.display_name}: rebind not implemented"
