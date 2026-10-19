@@ -36,6 +36,7 @@ from aitop.utils.fmt import (
     watts,
 )
 from aitop.views.tui_screens import (
+    CommandPaletteScreen,
     ConfirmScreen,
     FilterScreen,
     HelpScreen,
@@ -255,6 +256,7 @@ class AiTopApp(App[None]):
         Binding("right_square_bracket", "next_node", "Next node", show=False),
         Binding("j", "json_dump", "JSON", show=False),
         Binding("escape", "clear_filter", "Clear filter", show=False),
+        Binding("ctrl+p", "command_palette", "Palette"),
     ]
 
     def __init__(
@@ -998,6 +1000,9 @@ class AiTopApp(App[None]):
     def action_bench_model(self) -> None:
         self.run_worker(self._bench_selected(), exclusive=True)
 
+    def action_command_palette(self) -> None:
+        self.run_worker(self._show_command_palette(), exclusive=True)
+
     def action_delete_model(self) -> None:
         self.run_worker(self._delete_selected(), exclusive=True)
 
@@ -1272,3 +1277,92 @@ def run_tui(
     app = AiTopApp(config, allow_privileged=allow_privileged, interval=interval)
     app.run()
     return 0
+
+    async def _show_command_palette(self) -> None:
+        commands: list[tuple[str, str, str]] = [
+            ("tab:engines", "Switch to Engines Pane (1)", "navigate"),
+            ("tab:catalog", "Switch to Catalog Pane (2)", "navigate"),
+            ("tab:loaded", "Switch to Loaded Models Pane (3)", "navigate"),
+            ("tab:fleet", "Switch to Fleet Cluster Pane (4)", "navigate"),
+            ("refresh", "Force Refresh Telemetry (r)", "action"),
+            ("pause", "Toggle Pause / Resume (space)", "action"),
+            ("offline", "Toggle Offline Endpoints (a)", "view"),
+            ("bench", "Benchmark Selected Model (b)", "bench"),
+            ("load", "Load / Warm Model into Memory (l)", "lifecycle"),
+            ("unload", "Unload Resident Model Weights (u)", "lifecycle"),
+            ("pull", "Pull Model into Engine (p)", "hub"),
+            ("sort", "Cycle Catalog Sort Mode (o)", "view"),
+            ("json", "Dump Snapshot JSON to Log (j)", "debug"),
+            ("help", "Open Keybinding Cheat Sheet (?)", "help"),
+        ]
+        if self.snapshot:
+            for eng in self.snapshot.engines:
+                for m in eng.models:
+                    commands.append(
+                        (
+                            f"bench_model:{eng.kind.value}:{m.id}",
+                            f"Benchmark {m.name} via {eng.name}",
+                            "model",
+                        )
+                    )
+                    commands.append(
+                        (
+                            f"load_model:{eng.kind.value}:{m.id}",
+                            f"Warm {m.name} into {eng.name}",
+                            "model",
+                        )
+                    )
+
+        res = await self.push_screen_wait(CommandPaletteScreen(commands))
+        if not res:
+            return
+        cmd_id, _title = res
+        if cmd_id.startswith("tab:"):
+            target_tab = f"tab-{cmd_id.split(':')[1]}"
+            self.query_one("#tabs", TabbedContent).active = target_tab
+        elif cmd_id == "refresh":
+            self.action_refresh()
+        elif cmd_id == "pause":
+            self.action_toggle_pause()
+        elif cmd_id == "offline":
+            self.action_toggle_offline()
+        elif cmd_id == "bench":
+            self.action_bench_model()
+        elif cmd_id == "load":
+            self.action_load()
+        elif cmd_id == "unload":
+            self.action_unload()
+        elif cmd_id == "pull":
+            self.action_pull_model()
+        elif cmd_id == "sort":
+            self.action_cycle_sort()
+        elif cmd_id == "json":
+            self.action_json_dump()
+        elif cmd_id == "help":
+            self.action_help()
+        elif cmd_id.startswith("bench_model:"):
+            _, kind, mid = cmd_id.split(":", 2)
+            log = self.query_one("#log", RichLog)
+            log.write(f"[cyan]benchmarking {mid} via {kind}…[/]")
+            from aitop.bench import run_benchmark
+
+            try:
+                b_res = await run_benchmark(kind, mid, max_tokens=64, config=self.config)
+                if b_res.success:
+                    ttft_str = f"{b_res.ttft_ms:.1f}ms" if b_res.ttft_ms is not None else "—"
+                    log.write(
+                        f"[green]✓ {mid}: {b_res.tokens_per_second:.1f} tok/s · TTFT {ttft_str} · {b_res.completion_tokens} tokens[/]"
+                    )
+                else:
+                    log.write(f"[yellow]benchmark failed for {mid}: {b_res.error}[/]")
+            except Exception as exc:
+                log.write(f"[yellow]benchmark failed for {mid}: {exc}[/]")
+        elif cmd_id.startswith("load_model:"):
+            _, kind, mid = cmd_id.split(":", 2)
+            target = self._engine_by_kind(kind)
+            if target and target.supports("load"):
+                log = self.query_one("#log", RichLog)
+                log.write(f"[cyan]loading {mid} into {target.name}…[/]")
+                ok, msg = await target.load(mid)
+                self._log_result(ok, msg, source=target.name)
+                await self._force_refresh()
