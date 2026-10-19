@@ -238,6 +238,7 @@ class AiTopApp(App[None]):
         Binding("slash", "filter_catalog", "Filter"),
         Binding("o", "cycle_sort", "Sort"),
         Binding("p", "pull_model", "Pull"),
+        Binding("b", "bench_model", "Bench"),
         Binding("u", "unload", "Unload"),
         Binding("l", "load", "Load"),
         Binding("d", "delete_model", "Delete"),
@@ -994,6 +995,9 @@ class AiTopApp(App[None]):
     def action_pull_model(self) -> None:
         self.run_worker(self._pull_model(), exclusive=True)
 
+    def action_bench_model(self) -> None:
+        self.run_worker(self._bench_selected(), exclusive=True)
+
     def action_delete_model(self) -> None:
         self.run_worker(self._delete_selected(), exclusive=True)
 
@@ -1152,6 +1156,56 @@ class AiTopApp(App[None]):
         self._log_result(ok, message, source=target.name)
         await self._force_refresh()
         table.focus()
+
+    async def _bench_selected(self) -> None:
+        tabs = self.query_one("#tabs", TabbedContent)
+        model_id = None
+        engine_kind = None
+        if tabs.active in ("tab-catalog", "tab-loaded"):
+            table_id = "catalog" if tabs.active == "tab-catalog" else "loaded"
+            key = _row_key(self.query_one(f"#{table_id}", DataTable))
+            if key is not None:
+                engine_kind, _, model_id = key.partition(":")
+        if not model_id:
+            for tid in ("catalog", "loaded"):
+                k = _row_key(self.query_one(f"#{tid}", DataTable))
+                if k is not None:
+                    engine_kind, _, model_id = k.partition(":")
+                    break
+        if not model_id or not engine_kind:
+            self.query_one("#log", RichLog).write(
+                "[yellow]select a model in catalog (pane 2) or loaded (pane 3) first[/]"
+            )
+            return
+
+        target = self._engine_by_kind(engine_kind)
+        engine_name = target.name if target else engine_kind
+        if not await self._confirm(
+            "Benchmark model?",
+            f"Run 64-token inference benchmark on [bold]{model_id}[/] via {engine_name}?",
+        ):
+            return
+
+        log = self.query_one("#log", RichLog)
+        log.write(f"[cyan]benchmarking {model_id} via {engine_name} (64 tokens)…[/]")
+        from aitop.bench import run_benchmark
+
+        try:
+            res = await run_benchmark(
+                target or engine_kind,
+                model_id,
+                max_tokens=64,
+                config=self.config,
+            )
+            if res.success:
+                ttft_str = f"{res.ttft_ms:.1f}ms" if res.ttft_ms is not None else "—"
+                log.write(
+                    f"[green]✓ {model_id}: {res.tokens_per_second:.1f} tok/s · TTFT {ttft_str} · {res.completion_tokens} tokens in {res.total_duration_s:.1f}s[/]"
+                )
+            else:
+                log.write(f"[yellow]benchmark failed for {model_id}: {res.error}[/]")
+        except Exception as exc:
+            log.write(f"[yellow]benchmark failed for {model_id}: {exc}[/]")
 
     async def _lifecycle_selected(self, action: str, *, confirm: bool = False) -> None:
         engine = self._selected_engine()

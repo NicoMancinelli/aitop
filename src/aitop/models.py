@@ -1,7 +1,7 @@
 """Serializable telemetry contract shared by every aitop consumer.
 
 Everything the backend produces is a pydantic model in this module. The TUI,
-the TUI, Prometheus exporter (`aitop metrics` / `GET /metrics`), and remote
+Prometheus exporter (`aitop metrics` / `GET /metrics`), and remote
 fleet stream all speak this schema and nothing else — no renderer ever touches
 a subprocess or an HTTP client directly.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,6 +36,8 @@ class EngineKind(StrEnum):
     MLX = "mlx"
     VLLM = "vllm"
     LLAMA_SERVER = "llama-server"
+    SGLANG = "sglang"
+    APHRODITE = "aphrodite"
     UNKNOWN = "unknown"
 
 
@@ -303,6 +306,25 @@ class EngineSnapshot(Frozen):
 
 
 # --------------------------------------------------------------------------- #
+# Benchmarking & Telemetry
+# --------------------------------------------------------------------------- #
+
+
+class BenchmarkResult(Frozen):
+    """Result of an inference latency / throughput benchmark run."""
+
+    model: str
+    engine: EngineKind = EngineKind.UNKNOWN
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_duration_s: float = 0.0
+    ttft_ms: float | None = None
+    tokens_per_second: float = 0.0
+    error: str | None = None
+    success: bool = True
+
+
+# --------------------------------------------------------------------------- #
 # Top-level snapshot
 # --------------------------------------------------------------------------- #
 
@@ -324,3 +346,67 @@ class SystemSnapshot(Frozen):
     @property
     def all_loaded(self) -> list[LoadedModel]:
         return [m for e in self.engines for m in e.loaded]
+
+
+# --------------------------------------------------------------------------- #
+# Alerts & Cluster
+# --------------------------------------------------------------------------- #
+
+
+class AlertSeverity(StrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+class AlertEvent(Frozen):
+    """Telemetry or lifecycle event that crossed an alert threshold."""
+
+    id: str = Field(default_factory=lambda: uuid4().hex[:12])
+    severity: AlertSeverity = AlertSeverity.INFO
+    title: str
+    message: str
+    source: str = "local"
+    timestamp: datetime = Field(default_factory=_utcnow)
+    metric: str | None = None
+    value: float | None = None
+    threshold: float | None = None
+
+
+class ClusterSnapshot(Frozen):
+    """Aggregated fleet-wide telemetry across multiple aitop nodes."""
+
+    collected_at: datetime = Field(default_factory=_utcnow)
+    nodes: list[SystemSnapshot] = Field(default_factory=list)
+
+    @property
+    def total_nodes(self) -> int:
+        return len(self.nodes)
+
+    @property
+    def online_nodes(self) -> int:
+        return sum(1 for n in self.nodes if n.online_engines or n.hardware.host.hostname)
+
+    @property
+    def total_gpus(self) -> int:
+        return sum(len(n.hardware.gpus) for n in self.nodes)
+
+    @property
+    def total_vram_bytes(self) -> int:
+        return sum(gpu.vram_total_bytes or 0 for n in self.nodes for gpu in n.hardware.gpus)
+
+    @property
+    def used_vram_bytes(self) -> int:
+        return sum(gpu.vram_used_bytes or 0 for n in self.nodes for gpu in n.hardware.gpus)
+
+    @property
+    def online_engines(self) -> int:
+        return sum(len(n.online_engines) for n in self.nodes)
+
+    @property
+    def total_loaded_models(self) -> int:
+        return sum(len(n.all_loaded) for n in self.nodes)
+
+    @property
+    def cluster_tokens_per_second(self) -> float:
+        return sum(e.stats.tokens_per_second or 0.0 for n in self.nodes for e in n.online_engines)

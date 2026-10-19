@@ -18,9 +18,10 @@ inference telemetry, lifecycle control, and a fleet gateway for remote nodes.
    █▀█ █  █  █▄█ █▀▀
 ```
 
-> **Status: complete through Phase 5.** Engine abstraction, hardware telemetry,
-> the neofetch view, lifecycle control, Hugging Face search + Ollama pull, the
-> Textual btop-style TUI, and the fleet `serve` / `fleet` gateway are all in.
+> **Status: v1.0.0 Production Release.** Complete AI runtime control plane — multi-node cluster aggregation,
+> Tailscale fleet auto-discovery, native background daemon management (launchd/systemd), alerting engine (webhooks & bells),
+> live inference benchmarking (TTFT & tok/s), 7 engine adapters (Ollama, LM Studio, vLLM, llama-server, MLX, SGLang, Aphrodite),
+> full hardware telemetry (Apple Silicon, NVIDIA, AMD ROCm, Intel Arc/Xe), Textual TUI, web dashboard, and Prometheus cluster export.
 
 ---
 
@@ -41,6 +42,24 @@ uv tool install git+https://github.com/NicoMancinelli/aitop
 
 ```bash
 pipx install git+https://github.com/NicoMancinelli/aitop
+```
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew install NicoMancinelli/aitop/aitop
+```
+
+### Docker
+
+Run the TUI or gateway container with host networking so it can reach your local AI runtimes:
+
+```bash
+# Live one-shot dashboard or TUI
+docker run --rm -it --net=host ghcr.io/nicomancinelli/aitop:latest aitop tui
+
+# Background fleet serve gateway
+docker compose -f docker/docker-compose.yml up -d
 ```
 
 Requires Python 3.11+, which `uv` will fetch for you if needed.
@@ -127,12 +146,22 @@ aitop update           # upgrade in place
 | `u` | unload selected resident model |
 | `d` | delete catalog model from disk |
 | `p` | pull a model into the selected engine |
+| `b` | run inference benchmark on selected model |
 | `a` | toggle offline engines |
 | `r` | force refresh |
 | `esc` | clear catalog filter |
 | `q` | quit |
 
 The status strip shows Tailscale peers, hardware probe warnings, and snapshot age while paused. Cursor selection fills the detail strip (pid, managed-by, errors, format, VRAM).
+
+### Inference Benchmarking
+
+```bash
+aitop bench ollama llama3.2         # measure TTFT and tok/s against Ollama
+aitop bench vllm meta-llama/Llama-3 # measure OpenAI-compatible streaming
+aitop bench sglang default -t 128   # generate 128 tokens
+aitop bench ollama llama3.2 --json  # machine-readable benchmark JSON
+```
 
 ### Lifecycle
 
@@ -160,6 +189,16 @@ aitop models ingest org/model-GGUF
 aitop delete ollama old-model   # remove a model from disk
 aitop models search qwen2.5     # search the Hugging Face hub (GGUF by default)
 aitop models search mlx-llama --tag mlx
+```
+
+### Cluster & Service Management
+
+```bash
+aitop cluster                   # aggregated multi-node fleet overview (VRAM, GPUs, tok/s)
+aitop cluster --json            # machine-readable cluster JSON
+aitop service install           # install & start background gateway daemon (launchd/systemd)
+aitop service status            # check background daemon status & PID
+aitop service uninstall         # stop and cleanly remove background service
 ```
 
 ### Fleet & metrics
@@ -260,6 +299,14 @@ polling:
 ui:
   show_per_core: true
 
+alerts:
+  enabled: true
+  vram_threshold_pct: 90.0      # alert when VRAM exceeds 90%
+  temp_threshold_celsius: 85.0  # alert on high GPU thermals
+  engine_offline: true          # alert when an online runtime drops
+  webhook_url: https://hooks.slack.com/services/... # or Discord / generic JSON
+  terminal_bell: true           # ring terminal bell on critical alerts
+
 fleet:
   serve_host: 127.0.0.1
   serve_port: 9090
@@ -290,6 +337,8 @@ endpoints:
 | vLLM      | ✅ | ✅ | ✅ (listed = loaded) | ✅ (wake / LoRA / warm) | ✅ (sleep / LoRA) | — | ✅ | — |
 | llama-server | ✅ | ✅ | ✅ (router status) | ✅ (router or warm) | ✅ (router) | — | ✅ | — |
 | MLX       | ✅ | ✅ | ✅ | ✅ (warm) | — | — | ✅ | — |
+| SGLang    | ✅ | ✅ | ✅ (listed = loaded) | ✅ (warm) | — | — | ✅ | — |
+| Aphrodite | ✅ | ✅ | ✅ (listed = loaded) | ✅ (warm) | — | — | ✅ | — |
 
 | Platform | CPU | Memory | GPU | Power | Thermals |
 |----------|:---:|:------:|:---:|:-----:|:--------:|

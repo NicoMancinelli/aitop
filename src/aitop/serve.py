@@ -45,6 +45,7 @@ _ENDPOINTS = [
     "/healthz",
     "/api/snapshot",
     "/api/fleet",
+    "/api/cluster",
     "/api/stream",
     "/api/ws",
     "/metrics",
@@ -54,6 +55,7 @@ _ENDPOINTS = [
     "/api/models/load",
     "/api/models/unload",
     "/api/models/delete",
+    "/api/models/bench",
 ]
 _PUBLIC_GET = frozenset({"/healthz", "/ui"})
 _MUTATING_PREFIXES = ("/api/engines/", "/api/models/")
@@ -280,6 +282,14 @@ class SnapshotServer:
                     payload,
                     content_type="application/json",
                 )
+            elif path == "/api/cluster":
+                cluster = await self.collector.collect_cluster()
+                await self._write_raw(
+                    writer,
+                    200,
+                    cluster.model_dump_json().encode(),
+                    content_type="application/json",
+                )
             elif path == "/api/stream":
                 keep_open = True
                 await self._write_sse(writer)
@@ -349,6 +359,39 @@ class SnapshotServer:
             ok, message = await self._model_action(engine_raw, action, model_id)
             await self._write(writer, 200 if ok else 400, {"ok": ok, "message": message})
             await self.refresh()
+            return
+
+        if path == "/api/models/bench":
+            from aitop.bench import run_benchmark
+
+            engine_raw = str(payload.get("engine") or "")
+            model = payload.get("model")
+            model_id = str(model) if model is not None else None
+            if not model_id:
+                await self._write(writer, 400, {"error": "model required"})
+                return
+            prompt = str(
+                payload.get("prompt") or "Why is the sky blue? Answer in one short paragraph."
+            )
+            max_tokens = int(payload.get("tokens") or payload.get("max_tokens") or 64)
+            engine = self._find_engine(engine_raw)
+            resolved_engine = engine.kind.value if engine else engine_raw
+            try:
+                result = await run_benchmark(
+                    engine=resolved_engine,
+                    model=model_id,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    config=self.collector.config,
+                )
+                await self._write_raw(
+                    writer,
+                    200,
+                    result.model_dump_json().encode(),
+                    content_type="application/json",
+                )
+            except Exception as exc:
+                await self._write(writer, 500, {"error": f"benchmark failed: {exc}"})
             return
 
         await self._write(writer, 404, {"error": "not found"})

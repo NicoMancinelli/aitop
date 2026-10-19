@@ -6,6 +6,7 @@ aitop tui              # btop-style live Textual dashboard
 aitop --json | jq .    # the raw SystemSnapshot
 aitop start|stop|…     # lifecycle control
 aitop pull MODEL       # pull a model into Ollama
+aitop bench ENGINE MODEL # benchmark inference latency & tok/s
 aitop models search q  # search the Hugging Face hub
 aitop models ingest ID # pull an HF repo into Ollama via hf.co/…
 aitop serve            # expose /api/snapshot for the fleet
@@ -27,6 +28,7 @@ from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn
 from rich.table import Table
 
 from aitop import __version__
+from aitop.bench import run_benchmark
 from aitop.collector import SnapshotCollector
 from aitop.config import Config, config_path
 from aitop.engines.registry import EngineRegistry
@@ -57,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  aitop --watch          refresh every 2s\n"
             "  aitop tui              live btop-style TUI\n"
             "  aitop --json | jq .    machine-readable snapshot\n"
+            "  aitop bench ollama llama3.2  measure TTFT and tok/s\n"
             "  aitop unload ollama    evict resident Ollama weights\n"
             "  aitop load ollama m     warm a model into memory\n"
             "  aitop pull llama3.2    pull a model into Ollama\n"
@@ -165,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
         _add_common(sp)
         sp.add_argument(
             "engine",
-            help="runtime kind: ollama, lmstudio, vllm, llama-server, mlx",
+            help="runtime kind: ollama, lmstudio, vllm, llama-server, mlx, sglang, aphrodite",
         )
         sp.add_argument(
             "--host",
@@ -182,6 +185,28 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(load)
     load.add_argument("engine", help="runtime kind or endpoint name")
     load.add_argument("model", help="model id to load")
+
+    bench = subparsers.add_parser("bench", help="benchmark model latency and tok/s")
+    _add_common(bench)
+    bench.add_argument("engine", help="runtime kind or endpoint name")
+    bench.add_argument("model", help="model id to benchmark")
+    bench.add_argument(
+        "--prompt",
+        default="Explain the difference between a process and a thread in 3 sentences.",
+        help="prompt to send to the model",
+    )
+    bench.add_argument(
+        "--tokens",
+        "-t",
+        type=int,
+        default=64,
+        help="maximum completion tokens to generate (default: 64)",
+    )
+    bench.add_argument(
+        "--json",
+        action="store_true",
+        help="emit benchmark result as JSON",
+    )
 
     rebind = subparsers.add_parser(
         "rebind",
@@ -273,6 +298,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="runtime to pull into (default: ollama)",
     )
 
+    srv = subparsers.add_parser(
+        "service",
+        help="manage aitop serve as a background daemon (launchd/systemd)",
+    )
+    _add_common(srv)
+    srv_sub = srv.add_subparsers(dest="service_command", required=True)
+    srv_install = srv_sub.add_parser("install", help="install and start background service")
+    srv_install.add_argument("--host", default="0.0.0.0", help="host to bind (default: 0.0.0.0)")
+    srv_install.add_argument("--port", type=int, default=9090, help="port to bind (default: 9090)")
+    srv_sub.add_parser("status", help="check status of background service")
+    srv_sub.add_parser("uninstall", help="stop and uninstall background service")
+
+    cluster = subparsers.add_parser(
+        "cluster",
+        help="show aggregated multi-node fleet cluster telemetry",
+    )
+    _add_common(cluster)
+    cluster.add_argument("--json", action="store_true", help="emit cluster snapshot as JSON")
+
     delete = subparsers.add_parser("delete", help="remove a model from disk")
     _add_common(delete)
     delete.add_argument("engine", help="runtime kind (currently: ollama)")
@@ -360,6 +404,8 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(_run_unload(args, config, console))
             case "load":
                 return asyncio.run(_run_load(args, config, console))
+            case "bench":
+                return asyncio.run(_run_bench(args, config, console))
             case "delete":
                 return asyncio.run(_run_delete(args, config, console))
             case "rebind":
@@ -372,6 +418,10 @@ def main(argv: list[str] | None = None) -> int:
                 return _run_config(args, console)
             case "models":
                 return asyncio.run(_run_models(args, config, console))
+            case "service":
+                return _run_service(args, console)
+            case "cluster":
+                return asyncio.run(_run_cluster(args, config, console))
             case _:
                 return asyncio.run(_run_dashboard(args, config, console))
     except KeyboardInterrupt:
@@ -542,7 +592,7 @@ async def _run_fleet(args: argparse.Namespace, config: Config, console: Console)
 
 
 # --------------------------------------------------------------------------- #
-# Lifecycle
+# Lifecycle & Benchmarking
 # --------------------------------------------------------------------------- #
 
 
@@ -629,6 +679,54 @@ async def _run_load(args: argparse.Namespace, config: Config, console: Console) 
         ok, message = await engine.load(args.model)
         console.print(f"[{'green' if ok else 'yellow'}]{message}")
         return 0 if ok else 1
+    finally:
+        await registry.aclose()
+
+
+async def _run_bench(args: argparse.Namespace, config: Config, console: Console) -> int:
+    engine, registry, err = await _resolve_engine(config, args.engine)
+    try:
+        if err or engine is None:
+            console.print(f"[yellow]{err}")
+            return 1
+
+        if not args.json:
+            console.print(f"[cyan]benchmarking {args.model} on {engine.name}…[/]")
+
+        result = await run_benchmark(
+            engine,
+            args.model,
+            prompt=args.prompt,
+            max_tokens=args.tokens,
+        )
+
+        if args.json:
+            import json
+
+            print(json.dumps(result.model_dump(mode="json"), indent=2))
+            return 0 if result.success else 1
+
+        if not result.success:
+            console.print(f"[red]Benchmark failed:[/] {result.error}")
+            return 1
+
+        table = Table(box=None, pad_edge=False, padding=(0, 2))
+        table.add_column("METRIC", style="bold bright_cyan")
+        table.add_column("VALUE")
+        table.add_row("Model", result.model)
+        table.add_row("Runtime", engine.name)
+        table.add_row(
+            "Time to First Token (TTFT)",
+            f"{result.ttft_ms:.1f} ms" if result.ttft_ms is not None else "—",
+        )
+        table.add_row("Generation Speed", f"[bold green]{result.tokens_per_second:.1f} tok/s[/]")
+        table.add_row(
+            "Tokens", f"{result.prompt_tokens} prompt / {result.completion_tokens} completion"
+        )
+        table.add_row("Total Duration", f"{result.total_duration_s:.2f} s")
+
+        console.print(table)
+        return 0
     finally:
         await registry.aclose()
 
@@ -1011,3 +1109,67 @@ def _configure_logging(debug: bool) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
+
+
+def _run_service(args: argparse.Namespace, console: Console) -> int:
+    from aitop.service import install_service, status_service, uninstall_service
+
+    cmd = args.service_command
+    if cmd == "install":
+        console.print(f"[cyan]installing background service ({args.host}:{args.port})…[/]")
+        ok, msg = install_service(host=args.host, port=args.port)
+        console.print(f"[{'green' if ok else 'yellow'}]{msg}[/]")
+        return 0 if ok else 1
+    elif cmd == "status":
+        status = status_service()
+        state_str = (
+            "[bold green]Active[/]"
+            if status.active
+            else ("[yellow]Inactive[/]" if status.installed else "[dim]Not installed[/]")
+        )
+        console.print(f"Platform:  {status.platform}")
+        console.print(f"Status:    {state_str}")
+        if status.pid:
+            console.print(f"PID:       {status.pid}")
+        console.print(f"Detail:    {status.detail}")
+        if status.unit_path:
+            console.print(f"Unit path: {status.unit_path}")
+        return 0 if status.installed else 1
+    elif cmd == "uninstall":
+        console.print("[cyan]uninstalling background service…[/]")
+        ok, msg = uninstall_service()
+        console.print(f"[{'green' if ok else 'yellow'}]{msg}[/]")
+        return 0 if ok else 1
+    return 1
+
+
+async def _run_cluster(args: argparse.Namespace, config: Config, console: Console) -> int:
+    collector = SnapshotCollector(config, allow_privileged=not args.no_privileged)
+    try:
+        cluster = await collector.collect_cluster()
+        if args.json:
+            import json
+
+            print(json.dumps(cluster.model_dump(mode="json"), indent=2))
+            return 0
+
+        from aitop.utils.fmt import bytes_human
+
+        table = Table(box=None, pad_edge=False, padding=(0, 2))
+        table.add_column("METRIC", style="bold bright_cyan")
+        table.add_column("VALUE")
+        table.add_row("Nodes", f"{cluster.online_nodes} online / {cluster.total_nodes} total")
+        table.add_row("Total GPUs", str(cluster.total_gpus))
+        table.add_row(
+            "Cluster VRAM",
+            f"{bytes_human(cluster.used_vram_bytes)} / {bytes_human(cluster.total_vram_bytes)}"
+            if cluster.total_vram_bytes > 0
+            else "—",
+        )
+        table.add_row("Online Engines", str(cluster.online_engines))
+        table.add_row("Resident Models", str(cluster.total_loaded_models))
+        table.add_row("Cluster Throughput", f"{cluster.cluster_tokens_per_second:.1f} tok/s")
+        console.print(table)
+        return 0
+    finally:
+        await collector.aclose()
