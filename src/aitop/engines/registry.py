@@ -26,7 +26,13 @@ from aitop.config import Config, EndpointConfig
 from aitop.engines.base import BaseEngine
 from aitop.engines.lmstudio import LMStudioEngine
 from aitop.engines.ollama import OllamaEngine
-from aitop.engines.openai_compat import LlamaServerEngine, MLXEngine, VLLMEngine
+from aitop.engines.openai_compat import (
+    AphroditeEngine,
+    LlamaServerEngine,
+    MLXEngine,
+    SGLangEngine,
+    VLLMEngine,
+)
 from aitop.models import EngineKind, EngineSnapshot
 from aitop.version import __version__
 
@@ -38,6 +44,8 @@ ADAPTERS: dict[EngineKind, type[BaseEngine]] = {
     EngineKind.VLLM: VLLMEngine,
     EngineKind.LLAMA_SERVER: LlamaServerEngine,
     EngineKind.MLX: MLXEngine,
+    EngineKind.SGLANG: SGLangEngine,
+    EngineKind.APHRODITE: AphroditeEngine,
 }
 
 

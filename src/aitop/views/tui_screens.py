@@ -298,11 +298,11 @@ class HelpScreen(ModalScreen[None]):
   [bold]n[/] / [bold]][/]              next fleet node
   [bold]N[/] / [bold][[/]              previous fleet node
 
-[bold #39d2c0]Lifecycle[/]
+[bold #39d2c0]Lifecycle & Testing[/]
   [bold]s[/]  start selected engine     [bold]e[/]  restart (confirm)
   [bold]x[/]  stop selected engine      [bold]l[/]  load (picker, or catalog row)
   [bold]u[/]  unload resident model     [bold]d[/]  delete catalog model
-  [bold]p[/]  pull model into engine
+  [bold]p[/]  pull model into engine    [bold]b[/]  bench selected model (latency & tok/s)
 
 [bold #39d2c0]View[/]
   [bold]space[/]  pause / resume (status shows age while paused)
