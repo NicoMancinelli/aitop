@@ -242,6 +242,7 @@ class InferenceStats(Frozen):
     queue_depth: int = 0
     active_requests: int = 0
     total_requests: int = 0
+    latency_summary: LatencySummary | None = None
 
 
 class DownloadProgress(Frozen):
@@ -322,6 +323,108 @@ class BenchmarkResult(Frozen):
     tokens_per_second: float = 0.0
     error: str | None = None
     success: bool = True
+
+
+class ModelFitResult(Frozen):
+    """Estimation of model fit, VRAM requirements, and context headroom."""
+
+    fits: bool = True
+    """Whether the model weights and context fit entirely in available VRAM."""
+
+    gpu_offload_fraction: float = 1.0
+    """Estimated fraction of model/context that can be offloaded to GPU (0.0 to 1.0)."""
+
+    exceeds_memory: bool = False
+    """True if total memory required exceeds available VRAM."""
+
+    max_context_length: int = 0
+    """Maximum context length (tokens) that can fit in remaining VRAM headroom."""
+
+    model_size_bytes: int = 0
+    """Model weight size in bytes."""
+
+    kv_cache_bytes: int = 0
+    """KV cache memory required for requested context length in bytes."""
+
+    total_required_bytes: int = 0
+    """Total memory required (model weights + KV cache) in bytes."""
+
+    available_vram_bytes: int = 0
+    """Available VRAM capacity in bytes."""
+
+    headroom_bytes: int = 0
+    """Remaining VRAM headroom in bytes after model and context (negative if exceeds)."""
+
+    @property
+    def fits_in_vram(self) -> bool:
+        """Alias for fits (whether model weights and context fit in VRAM)."""
+        return self.fits
+
+    @property
+    def max_context_tokens(self) -> int:
+        """Alias for max_context_length."""
+        return self.max_context_length
+
+
+class LatencySummary(Frozen):
+    """Summary of inference request latency percentiles and throughput."""
+
+    sample_count: int = 0
+    ttft_p50: float | None = None
+    ttft_p90: float | None = None
+    ttft_p95: float | None = None
+    ttft_p99: float | None = None
+    ttft_min: float | None = None
+    ttft_max: float | None = None
+    ttft_mean: float | None = None
+
+    tok_per_sec_p50: float | None = None
+    tok_per_sec_p90: float | None = None
+    tok_per_sec_p95: float | None = None
+    tok_per_sec_p99: float | None = None
+    tok_per_sec_min: float | None = None
+    tok_per_sec_max: float | None = None
+    tok_per_sec_mean: float | None = None
+
+    duration_p50: float | None = None
+    duration_p90: float | None = None
+    duration_p95: float | None = None
+    duration_p99: float | None = None
+    duration_min: float | None = None
+    duration_max: float | None = None
+    duration_mean: float | None = None
+
+    @property
+    def tokens_per_sec_p50(self) -> float | None:
+        return self.tok_per_sec_p50
+
+    @property
+    def tokens_per_sec_p90(self) -> float | None:
+        return self.tok_per_sec_p90
+
+    @property
+    def tokens_per_sec_p95(self) -> float | None:
+        return self.tok_per_sec_p95
+
+    @property
+    def tokens_per_sec_p99(self) -> float | None:
+        return self.tok_per_sec_p99
+
+    @property
+    def tps_p50(self) -> float | None:
+        return self.tok_per_sec_p50
+
+    @property
+    def tps_p90(self) -> float | None:
+        return self.tok_per_sec_p90
+
+    @property
+    def tps_p95(self) -> float | None:
+        return self.tok_per_sec_p95
+
+    @property
+    def tps_p99(self) -> float | None:
+        return self.tok_per_sec_p99
 
 
 # --------------------------------------------------------------------------- #

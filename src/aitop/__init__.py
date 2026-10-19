@@ -7,7 +7,13 @@ resulting `SystemSnapshot` however you like.
 from aitop.bus import EventBus, Topic
 from aitop.collector import SnapshotCollector
 from aitop.config import Config
-from aitop.models import EngineSnapshot, HardwareSnapshot, SystemSnapshot
+from aitop.models import (
+    EngineSnapshot,
+    HardwareSnapshot,
+    LatencySummary,
+    ModelFitResult,
+    SystemSnapshot,
+)
 from aitop.version import __version__
 
 __all__ = [
@@ -15,6 +21,8 @@ __all__ = [
     "EngineSnapshot",
     "EventBus",
     "HardwareSnapshot",
+    "LatencySummary",
+    "ModelFitResult",
     "SnapshotCollector",
     "SystemSnapshot",
     "Topic",
