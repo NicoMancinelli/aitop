@@ -1,6 +1,6 @@
 """Best-effort inference throughput parsers shared by engine adapters.
 
-vLLM already exposes Prometheus gauges; Ollama and LM Studio usually only
+vLLM, SGLang, and Aphrodite already expose Prometheus gauges; Ollama and LM Studio usually only
 report timing on generate/completions responses. Adapters cache the last good
 sample and optionally soft-probe when models are resident.
 """
@@ -81,7 +81,7 @@ def inference_stats_from_lmstudio(payload: dict[str, Any]) -> InferenceStats:
 def parse_prometheus_stats(text: str) -> InferenceStats:
     """Extract useful gauges/counters from a Prometheus `/metrics` dump.
 
-    Understands vLLM, llama.cpp, and experimental Ollama metric names.
+    Understands vLLM, SGLang, Aphrodite, llama.cpp, and experimental Ollama metric names.
     """
     values: dict[str, float] = {}
     for line in text.splitlines():
@@ -99,6 +99,8 @@ def parse_prometheus_stats(text: str) -> InferenceStats:
     tps = _first_present(
         values,
         "vllm:avg_generation_throughput_toks_per_s",
+        "sglang:gen_throughput",
+        "aphrodite:avg_generation_throughput_toks_per_s",
         "llamacpp:tokens_predicted_seconds",
         "llamacpp:predicted_tokens_seconds",
         "prompt_tokens_seconds",  # some llama-server builds
@@ -109,6 +111,8 @@ def parse_prometheus_stats(text: str) -> InferenceStats:
     prompt_tps = _first_present(
         values,
         "vllm:avg_prompt_throughput_toks_per_s",
+        "sglang:prompt_throughput",
+        "aphrodite:avg_prompt_throughput_toks_per_s",
         "llamacpp:tokens_prompt_seconds",
         "llamacpp:prompt_tokens_seconds",
         "prompt_tokens_per_second",
@@ -117,12 +121,18 @@ def parse_prometheus_stats(text: str) -> InferenceStats:
     queue = _first_present(
         values,
         "vllm:num_requests_waiting",
+        "sglang:num_requests_waiting",
+        "sglang:num_waiting_reqs",
+        "aphrodite:num_requests_waiting",
         "llamacpp:requests_deferred",
         "ollama_requests_waiting",
     )
     active = _first_present(
         values,
         "vllm:num_requests_running",
+        "sglang:num_requests_running",
+        "sglang:num_running_reqs",
+        "aphrodite:num_requests_running",
         "llamacpp:requests_processing",
         "ollama_requests_running",
         "http_requests_in_flight",
@@ -130,6 +140,8 @@ def parse_prometheus_stats(text: str) -> InferenceStats:
     total_raw = _first_present(
         values,
         "vllm:request_success_total",
+        "sglang:request_success_total",
+        "aphrodite:request_success_total",
         "llamacpp:requests_total",
         "ollama_requests_total",
         "requests_total",
