@@ -36,6 +36,7 @@ from aitop.utils.fmt import (
     watts,
 )
 from aitop.views.tui_screens import (
+    CommandPaletteScreen,
     ConfirmScreen,
     FilterScreen,
     HelpScreen,
@@ -238,6 +239,7 @@ class AiTopApp(App[None]):
         Binding("slash", "filter_catalog", "Filter"),
         Binding("o", "cycle_sort", "Sort"),
         Binding("p", "pull_model", "Pull"),
+        Binding("b", "bench_model", "Bench"),
         Binding("u", "unload", "Unload"),
         Binding("l", "load", "Load"),
         Binding("d", "delete_model", "Delete"),
@@ -254,6 +256,7 @@ class AiTopApp(App[None]):
         Binding("right_square_bracket", "next_node", "Next node", show=False),
         Binding("j", "json_dump", "JSON", show=False),
         Binding("escape", "clear_filter", "Clear filter", show=False),
+        Binding("ctrl+p", "command_palette", "Palette"),
     ]
 
     def __init__(
@@ -994,6 +997,12 @@ class AiTopApp(App[None]):
     def action_pull_model(self) -> None:
         self.run_worker(self._pull_model(), exclusive=True)
 
+    def action_bench_model(self) -> None:
+        self.run_worker(self._bench_selected(), exclusive=True)
+
+    def action_command_palette(self) -> None:
+        self.run_worker(self._show_command_palette(), exclusive=True)
+
     def action_delete_model(self) -> None:
         self.run_worker(self._delete_selected(), exclusive=True)
 
@@ -1153,6 +1162,56 @@ class AiTopApp(App[None]):
         await self._force_refresh()
         table.focus()
 
+    async def _bench_selected(self) -> None:
+        tabs = self.query_one("#tabs", TabbedContent)
+        model_id = None
+        engine_kind = None
+        if tabs.active in ("tab-catalog", "tab-loaded"):
+            table_id = "catalog" if tabs.active == "tab-catalog" else "loaded"
+            key = _row_key(self.query_one(f"#{table_id}", DataTable))
+            if key is not None:
+                engine_kind, _, model_id = key.partition(":")
+        if not model_id:
+            for tid in ("catalog", "loaded"):
+                k = _row_key(self.query_one(f"#{tid}", DataTable))
+                if k is not None:
+                    engine_kind, _, model_id = k.partition(":")
+                    break
+        if not model_id or not engine_kind:
+            self.query_one("#log", RichLog).write(
+                "[yellow]select a model in catalog (pane 2) or loaded (pane 3) first[/]"
+            )
+            return
+
+        target = self._engine_by_kind(engine_kind)
+        engine_name = target.name if target else engine_kind
+        if not await self._confirm(
+            "Benchmark model?",
+            f"Run 64-token inference benchmark on [bold]{model_id}[/] via {engine_name}?",
+        ):
+            return
+
+        log = self.query_one("#log", RichLog)
+        log.write(f"[cyan]benchmarking {model_id} via {engine_name} (64 tokens)…[/]")
+        from aitop.bench import run_benchmark
+
+        try:
+            res = await run_benchmark(
+                target or engine_kind,
+                model_id,
+                max_tokens=64,
+                config=self.config,
+            )
+            if res.success:
+                ttft_str = f"{res.ttft_ms:.1f}ms" if res.ttft_ms is not None else "—"
+                log.write(
+                    f"[green]✓ {model_id}: {res.tokens_per_second:.1f} tok/s · TTFT {ttft_str} · {res.completion_tokens} tokens in {res.total_duration_s:.1f}s[/]"
+                )
+            else:
+                log.write(f"[yellow]benchmark failed for {model_id}: {res.error}[/]")
+        except Exception as exc:
+            log.write(f"[yellow]benchmark failed for {model_id}: {exc}[/]")
+
     async def _lifecycle_selected(self, action: str, *, confirm: bool = False) -> None:
         engine = self._selected_engine()
         if engine is None:
@@ -1218,3 +1277,92 @@ def run_tui(
     app = AiTopApp(config, allow_privileged=allow_privileged, interval=interval)
     app.run()
     return 0
+
+    async def _show_command_palette(self) -> None:
+        commands: list[tuple[str, str, str]] = [
+            ("tab:engines", "Switch to Engines Pane (1)", "navigate"),
+            ("tab:catalog", "Switch to Catalog Pane (2)", "navigate"),
+            ("tab:loaded", "Switch to Loaded Models Pane (3)", "navigate"),
+            ("tab:fleet", "Switch to Fleet Cluster Pane (4)", "navigate"),
+            ("refresh", "Force Refresh Telemetry (r)", "action"),
+            ("pause", "Toggle Pause / Resume (space)", "action"),
+            ("offline", "Toggle Offline Endpoints (a)", "view"),
+            ("bench", "Benchmark Selected Model (b)", "bench"),
+            ("load", "Load / Warm Model into Memory (l)", "lifecycle"),
+            ("unload", "Unload Resident Model Weights (u)", "lifecycle"),
+            ("pull", "Pull Model into Engine (p)", "hub"),
+            ("sort", "Cycle Catalog Sort Mode (o)", "view"),
+            ("json", "Dump Snapshot JSON to Log (j)", "debug"),
+            ("help", "Open Keybinding Cheat Sheet (?)", "help"),
+        ]
+        if self.snapshot:
+            for eng in self.snapshot.engines:
+                for m in eng.models:
+                    commands.append(
+                        (
+                            f"bench_model:{eng.kind.value}:{m.id}",
+                            f"Benchmark {m.name} via {eng.name}",
+                            "model",
+                        )
+                    )
+                    commands.append(
+                        (
+                            f"load_model:{eng.kind.value}:{m.id}",
+                            f"Warm {m.name} into {eng.name}",
+                            "model",
+                        )
+                    )
+
+        res = await self.push_screen_wait(CommandPaletteScreen(commands))
+        if not res:
+            return
+        cmd_id, _title = res
+        if cmd_id.startswith("tab:"):
+            target_tab = f"tab-{cmd_id.split(':')[1]}"
+            self.query_one("#tabs", TabbedContent).active = target_tab
+        elif cmd_id == "refresh":
+            self.action_refresh()
+        elif cmd_id == "pause":
+            self.action_toggle_pause()
+        elif cmd_id == "offline":
+            self.action_toggle_offline()
+        elif cmd_id == "bench":
+            self.action_bench_model()
+        elif cmd_id == "load":
+            self.action_load()
+        elif cmd_id == "unload":
+            self.action_unload()
+        elif cmd_id == "pull":
+            self.action_pull_model()
+        elif cmd_id == "sort":
+            self.action_cycle_sort()
+        elif cmd_id == "json":
+            self.action_json_dump()
+        elif cmd_id == "help":
+            self.action_help()
+        elif cmd_id.startswith("bench_model:"):
+            _, kind, mid = cmd_id.split(":", 2)
+            log = self.query_one("#log", RichLog)
+            log.write(f"[cyan]benchmarking {mid} via {kind}…[/]")
+            from aitop.bench import run_benchmark
+
+            try:
+                b_res = await run_benchmark(kind, mid, max_tokens=64, config=self.config)
+                if b_res.success:
+                    ttft_str = f"{b_res.ttft_ms:.1f}ms" if b_res.ttft_ms is not None else "—"
+                    log.write(
+                        f"[green]✓ {mid}: {b_res.tokens_per_second:.1f} tok/s · TTFT {ttft_str} · {b_res.completion_tokens} tokens[/]"
+                    )
+                else:
+                    log.write(f"[yellow]benchmark failed for {mid}: {b_res.error}[/]")
+            except Exception as exc:
+                log.write(f"[yellow]benchmark failed for {mid}: {exc}[/]")
+        elif cmd_id.startswith("load_model:"):
+            _, kind, mid = cmd_id.split(":", 2)
+            target = self._engine_by_kind(kind)
+            if target and target.supports("load"):
+                log = self.query_one("#log", RichLog)
+                log.write(f"[cyan]loading {mid} into {target.name}…[/]")
+                ok, msg = await target.load(mid)
+                self._log_result(ok, msg, source=target.name)
+                await self._force_refresh()

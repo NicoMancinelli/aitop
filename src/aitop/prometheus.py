@@ -7,7 +7,7 @@ Mounted at `GET /metrics` on `aitop serve`, and also available one-shot via
 
 from __future__ import annotations
 
-from aitop.models import SystemSnapshot
+from aitop.models import ClusterSnapshot, SystemSnapshot
 from aitop.version import __version__
 
 
@@ -108,3 +108,39 @@ def render_prometheus(snapshot: SystemSnapshot) -> str:
 def _esc(value: str) -> str:
     """Escape a label value for the Prometheus text format."""
     return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def render_cluster_prometheus(cluster: ClusterSnapshot) -> str:
+    """Render cluster-wide Prometheus gauges and all node metrics."""
+    lines: list[str] = []
+
+    def help_type(name: str, help_text: str, kind: str = "gauge") -> None:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {kind}")
+
+    help_type("aitop_cluster_nodes_total", "Total nodes in the fleet cluster")
+    lines.append(f"aitop_cluster_nodes_total {cluster.total_nodes}")
+
+    help_type("aitop_cluster_nodes_online", "Online nodes in the fleet cluster")
+    lines.append(f"aitop_cluster_nodes_online {cluster.online_nodes}")
+
+    help_type("aitop_cluster_gpus_total", "Total GPUs in the cluster")
+    lines.append(f"aitop_cluster_gpus_total {cluster.total_gpus}")
+
+    help_type("aitop_cluster_vram_bytes", "Cluster aggregated VRAM pool")
+    lines.append(f'aitop_cluster_vram_bytes{{state="total"}} {cluster.total_vram_bytes}')
+    lines.append(f'aitop_cluster_vram_bytes{{state="used"}} {cluster.used_vram_bytes}')
+
+    help_type("aitop_cluster_engines_online", "Total online AI engines across the cluster")
+    lines.append(f"aitop_cluster_engines_online {cluster.online_engines}")
+
+    help_type("aitop_cluster_models_loaded", "Total resident models across the cluster")
+    lines.append(f"aitop_cluster_models_loaded {cluster.total_loaded_models}")
+
+    help_type("aitop_cluster_tokens_per_second", "Aggregate inference throughput tok/s")
+    lines.append(f"aitop_cluster_tokens_per_second {cluster.cluster_tokens_per_second}")
+
+    for node_snap in cluster.nodes:
+        lines.append(render_prometheus(node_snap))
+
+    return "\n".join(lines) + "\n"

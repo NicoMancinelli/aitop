@@ -298,11 +298,11 @@ class HelpScreen(ModalScreen[None]):
   [bold]n[/] / [bold]][/]              next fleet node
   [bold]N[/] / [bold][[/]              previous fleet node
 
-[bold #39d2c0]Lifecycle[/]
+[bold #39d2c0]Lifecycle & Testing[/]
   [bold]s[/]  start selected engine     [bold]e[/]  restart (confirm)
   [bold]x[/]  stop selected engine      [bold]l[/]  load (picker, or catalog row)
   [bold]u[/]  unload resident model     [bold]d[/]  delete catalog model
-  [bold]p[/]  pull model into engine
+  [bold]p[/]  pull model into engine    [bold]b[/]  bench selected model (latency & tok/s)
 
 [bold #39d2c0]View[/]
   [bold]space[/]  pause / resume (status shows age while paused)
@@ -328,3 +328,110 @@ gauges and tables render.
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+class CommandPaletteScreen(ModalScreen[tuple[str, str] | None]):
+    """Spotlight-style command palette for quick action execution."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=True),
+        Binding("enter", "select", "Execute", show=True),
+        Binding("up", "cursor_up", "Up", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
+    ]
+
+    CSS = f"""
+    CommandPaletteScreen {{
+        {_CSS_SURFACE}
+        background: rgba(14, 17, 22, 0.75);
+    }}
+    #palette-box {{
+        width: 76;
+        {_BOX}
+        padding: 1 1;
+        max-height: 85%;
+    }}
+    #palette-title {{
+        text-style: bold;
+        color: #39d2c0;
+        margin: 0 1 1 1;
+    }}
+    #palette-input {{
+        background: #0e1116;
+        border: tall #30363d;
+        margin: 0 1 1 1;
+    }}
+    #palette-input:focus {{
+        border: tall #39d2c0;
+    }}
+    #palette-list {{
+        height: 14;
+        background: #161b22;
+        border: tall #30363d;
+        margin: 0 1;
+    }}
+    """
+
+    def __init__(self, commands: list[tuple[str, str, str]]) -> None:
+        super().__init__()
+        self._all_commands = commands
+        self._filtered: list[tuple[str, str, str]] = list(commands)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="palette-box"):
+            yield Label("Command Palette (Ctrl+P)", id="palette-title")
+            yield Input(
+                placeholder="Type to search actions, models, engines, themes…", id="palette-input"
+            )
+            yield OptionList(id="palette-list")
+            yield Static("[dim]↑/↓ navigate · enter execute · esc close[/]", markup=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._update_options()
+        self.query_one("#palette-input", Input).focus()
+
+    def _update_options(self) -> None:
+        opts = self.query_one("#palette-list", OptionList)
+        opts.clear_options()
+        for cmd_id, title, cat in self._filtered:
+            opts.add_option(Option(f"[{cat.upper()}]  {title}", id=cmd_id))
+        if self._filtered:
+            opts.highlighted = 0
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        needle = event.value.strip().lower()
+        if not needle:
+            self._filtered = list(self._all_commands)
+        else:
+            self._filtered = [
+                c for c in self._all_commands if needle in c[1].lower() or needle in c[2].lower()
+            ]
+        self._update_options()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cursor_up(self) -> None:
+        opts = self.query_one("#palette-list", OptionList)
+        if opts.highlighted is not None and opts.highlighted > 0:
+            opts.highlighted -= 1
+
+    def action_cursor_down(self) -> None:
+        opts = self.query_one("#palette-list", OptionList)
+        if opts.highlighted is not None and opts.highlighted < len(self._filtered) - 1:
+            opts.highlighted += 1
+
+    def action_select(self) -> None:
+        opts = self.query_one("#palette-list", OptionList)
+        if opts.highlighted is not None and 0 <= opts.highlighted < len(self._filtered):
+            cmd_id, title, cat = self._filtered[opts.highlighted]
+            self.dismiss((cmd_id, title))
+        else:
+            self.dismiss(None)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        cmd_id = event.option_id
+        cmd = next((c for c in self._filtered if c[0] == cmd_id), None)
+        if cmd:
+            self.dismiss((cmd[0], cmd[1]))

@@ -24,6 +24,8 @@ _SYSTEMD_UNITS: dict[str, tuple[str, ...]] = {
     "vllm": ("vllm.service",),
     "llama-server": ("llama-server.service", "llamacpp.service"),
     "mlx": ("mlx-openai-server.service", "mlx_lm.service"),
+    "sglang": ("sglang.service",),
+    "aphrodite": ("aphrodite.service",),
 }
 
 _LAUNCHD_LABELS: dict[str, tuple[str, ...]] = {
@@ -37,6 +39,8 @@ _START_BINARIES: dict[str, tuple[str, ...]] = {
     "vllm": ("vllm", "serve"),
     "llama-server": ("llama-server",),
     "mlx": ("mlx_lm.server",),
+    "sglang": ("python3", "-m", "sglang.launch_server"),
+    "aphrodite": ("aphrodite", "run"),
 }
 
 

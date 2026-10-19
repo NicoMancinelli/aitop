@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  aitop:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ghcr.io/nicomancinelli/aitop:latest
+    container_name: aitop
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    environment:
+      - AITOP_NO_UPDATE_CHECK=1
+    volumes:
+      # Optional: mount host config if available
+      - ~/.config/aitop:/root/.config/aitop:ro
+      # Optional: access host process info if running with host PID
+    pid: host
+    network_mode: host
