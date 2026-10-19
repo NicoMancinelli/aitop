@@ -140,6 +140,23 @@ class FleetConfig(BaseModel):
     serve_auth_all: bool = False
     """If true and `serve_token` is set, protect every route except `/healthz`."""
 
+    auto_discover_tailscale: bool = True
+    """Automatically probe Tailscale peers for aitop serve gateways."""
+
+    auto_discover_port: int = 9090
+    """Default port to probe for peer aitop serve gateways."""
+
+
+class AlertConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    vram_threshold_pct: float = 90.0
+    temp_threshold_celsius: float = 85.0
+    engine_offline: bool = True
+    webhook_url: str | None = None
+    terminal_bell: bool = False
+
 
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -149,6 +166,7 @@ class Config(BaseModel):
     ui: UIConfig = Field(default_factory=UIConfig)
     updates: UpdateConfig = Field(default_factory=UpdateConfig)
     fleet: FleetConfig = Field(default_factory=FleetConfig)
+    alerts: AlertConfig = Field(default_factory=AlertConfig)
     endpoints: list[EndpointConfig] = Field(default_factory=list)
     """Extra endpoints, merged with auto-discovered ones."""
 

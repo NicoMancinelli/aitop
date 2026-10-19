@@ -145,6 +145,7 @@ def render_dashboard(*, auth_required: bool = False, auth_all: bool = False) -> 
   aitop {__version__} ·
   <a href="/api/snapshot">/api/snapshot</a> ·
   <a href="/api/fleet">/api/fleet</a> ·
+  <a href="/api/cluster">/api/cluster</a> ·
   <a href="/api/stream">/api/stream</a> ·
   <a href="/metrics">/metrics</a>
 </footer>
@@ -316,7 +317,7 @@ function render(snap) {{
     const mid = esc(m.id);
     return `<tr><td>${{esc(m.name)}}</td><td>${{kind}}</td><td>${{fmtBytes(m.size_bytes)}}</td>
       <td>${{gpu}}</td><td>${{ctx}}</td>
-      <td><button class="danger" data-mact="unload" data-kind="${{kind}}" data-model="${{mid}}">unload</button></td></tr>`;
+      <td><button data-mact="bench" data-kind="${{kind}}" data-model="${{mid}}">bench</button> <button class="danger" data-mact="unload" data-kind="${{kind}}" data-model="${{mid}}">unload</button></td></tr>`;
   }}).join("") || `<tr><td colspan="6" class="sub">no resident models</td></tr>`;
 }}
 
@@ -352,6 +353,15 @@ document.body.addEventListener("click", async (ev) => {{
     const act = btn.dataset.mact;
     const kind = btn.dataset.kind;
     const model = btn.dataset.model;
+    if (act === "bench") {{
+      toast("benchmarking " + model + " (64 tokens)…");
+      const res = await api("/api/models/bench", {{ engine: kind, model: model, tokens: 64 }});
+      if (res && res.tokens_per_second != null) {{
+        const ttft = res.ttft_ms != null ? res.ttft_ms.toFixed(1) + "ms" : "—";
+        toast("✓ " + model + ": " + res.tokens_per_second.toFixed(1) + " tok/s · TTFT " + ttft);
+      }}
+      return;
+    }}
     if (act === "delete" && !confirm("Delete " + model + " from disk?")) return;
     await api(`/api/models/${{act}}`, {{ engine: kind, model }});
   }}

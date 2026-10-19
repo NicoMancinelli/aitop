@@ -18,9 +18,10 @@ inference telemetry, lifecycle control, and a fleet gateway for remote nodes.
    █▀█ █  █  █▄█ █▀▀
 ```
 
-> **Status: v0.3.0 complete.** Engine abstraction (Ollama, LM Studio, vLLM, llama-server, MLX, SGLang, Aphrodite),
-> hardware telemetry (Apple Silicon, NVIDIA, AMD ROCm, Intel Arc/Xe), live inference benchmarking (TTFT & tok/s),
-> lifecycle control, Hugging Face hub search & ingest, Textual btop-style TUI, Docker/Homebrew distribution, and the fleet `serve` gateway.
+> **Status: v1.0.0 Production Release.** Complete AI runtime control plane — multi-node cluster aggregation,
+> Tailscale fleet auto-discovery, native background daemon management (launchd/systemd), alerting engine (webhooks & bells),
+> live inference benchmarking (TTFT & tok/s), 7 engine adapters (Ollama, LM Studio, vLLM, llama-server, MLX, SGLang, Aphrodite),
+> full hardware telemetry (Apple Silicon, NVIDIA, AMD ROCm, Intel Arc/Xe), Textual TUI, web dashboard, and Prometheus cluster export.
 
 ---
 
@@ -190,6 +191,16 @@ aitop models search qwen2.5     # search the Hugging Face hub (GGUF by default)
 aitop models search mlx-llama --tag mlx
 ```
 
+### Cluster & Service Management
+
+```bash
+aitop cluster                   # aggregated multi-node fleet overview (VRAM, GPUs, tok/s)
+aitop cluster --json            # machine-readable cluster JSON
+aitop service install           # install & start background gateway daemon (launchd/systemd)
+aitop service status            # check background daemon status & PID
+aitop service uninstall         # stop and cleanly remove background service
+```
+
 ### Fleet & metrics
 
 ```bash
@@ -287,6 +298,14 @@ polling:
 
 ui:
   show_per_core: true
+
+alerts:
+  enabled: true
+  vram_threshold_pct: 90.0      # alert when VRAM exceeds 90%
+  temp_threshold_celsius: 85.0  # alert on high GPU thermals
+  engine_offline: true          # alert when an online runtime drops
+  webhook_url: https://hooks.slack.com/services/... # or Discord / generic JSON
+  terminal_bell: true           # ring terminal bell on critical alerts
 
 fleet:
   serve_host: 127.0.0.1
