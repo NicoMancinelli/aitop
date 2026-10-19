@@ -1,12 +1,12 @@
 """Shared adapter for OpenAI-compatible local servers.
 
-Covers vLLM, llama.cpp's `llama-server`, and MLX OpenAI-style frontends.
+Covers vLLM, SGLang, Aphrodite, llama.cpp's `llama-server`, and MLX OpenAI-style frontends.
 All speak some subset of:
 
   GET /v1/models          — model catalogue (always)
-  GET /health             — liveness (llama-server, some MLX)
+  GET /health             — liveness (llama-server, some MLX, sglang, aphrodite)
   GET /v1/models/{id}     — detail (rare)
-  GET /metrics            — Prometheus counters (vLLM)
+  GET /metrics            — Prometheus counters (vLLM, SGLang, Aphrodite)
 
 Load / unload where the upstream APIs allow it:
 
@@ -41,9 +41,11 @@ from aitop.utils.parse import first, to_int
 
 # Re-export for callers that imported the parser from this module.
 __all__ = (
+    "AphroditeEngine",
     "LlamaServerEngine",
     "MLXEngine",
     "OpenAICompatEngine",
+    "SGLangEngine",
     "VLLMEngine",
     "parse_prometheus_stats",
 )
@@ -286,7 +288,7 @@ class VLLMEngine(OpenAICompatEngine):
         status, body = await self._post_json("/wake_up")
         if 200 <= status < 300:
             return True, f"woke vLLM ({model_id})"
-        # 404/405 → sleep mode off; other errors fall through to LoRA / warm.
+        # 404/405 -> sleep mode off; other errors fall through to LoRA / warm.
 
         # LoRA adapters: model_id may be "name=/path" or just a path/name.
         lora_name, lora_path = _split_lora_ref(model_id)
@@ -325,6 +327,47 @@ class VLLMEngine(OpenAICompatEngine):
                 "or a LoRA name with runtime LoRA updating enabled"
             )
         return False, f"sleep failed: {_format_http_error(status, body)}"
+
+
+class SGLangEngine(OpenAICompatEngine):
+    """SGLang runtime: high-performance LLM engine with RadixAttention."""
+
+    kind: ClassVar[EngineKind] = EngineKind.SGLANG
+    display_name: ClassVar[str] = "SGLang"
+    process_names: ClassVar[tuple[str, ...]] = ("sglang", "sglang.launch_server")
+    health_paths: ClassVar[tuple[str, ...]] = ("/health", "/v1/models")
+    metrics_path: ClassVar[str | None] = "/metrics"
+    capabilities: ClassVar[frozenset[str]] = frozenset(
+        {
+            EngineCapability.TELEMETRY,
+            EngineCapability.LIST_MODELS,
+            EngineCapability.LIST_LOADED,
+            EngineCapability.LIFECYCLE,
+            EngineCapability.LOAD,
+        }
+    )
+
+
+class AphroditeEngine(OpenAICompatEngine):
+    """Aphrodite Engine: inference engine designed for PygmalionAI / local creative workflows."""
+
+    kind: ClassVar[EngineKind] = EngineKind.APHRODITE
+    display_name: ClassVar[str] = "Aphrodite"
+    process_names: ClassVar[tuple[str, ...]] = (
+        "aphrodite",
+        "aphrodite.endpoints.openai.api_server",
+    )
+    health_paths: ClassVar[tuple[str, ...]] = ("/health", "/v1/models")
+    metrics_path: ClassVar[str | None] = "/metrics"
+    capabilities: ClassVar[frozenset[str]] = frozenset(
+        {
+            EngineCapability.TELEMETRY,
+            EngineCapability.LIST_MODELS,
+            EngineCapability.LIST_LOADED,
+            EngineCapability.LIFECYCLE,
+            EngineCapability.LOAD,
+        }
+    )
 
 
 class LlamaServerEngine(OpenAICompatEngine):
@@ -461,7 +504,7 @@ def _llama_status_value(entry: dict[str, Any]) -> str:
         return str(status.get("value") or "").lower()
     if isinstance(status, str):
         return status.lower()
-    return "loaded"  # older /v1/models entries have no status → treat as resident
+    return "loaded"  # older /v1/models entries have no status -> treat as resident
 
 
 def _split_lora_ref(model_id: str) -> tuple[str, str]:

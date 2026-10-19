@@ -1,7 +1,7 @@
 """Serializable telemetry contract shared by every aitop consumer.
 
 Everything the backend produces is a pydantic model in this module. The TUI,
-the TUI, Prometheus exporter (`aitop metrics` / `GET /metrics`), and remote
+Prometheus exporter (`aitop metrics` / `GET /metrics`), and remote
 fleet stream all speak this schema and nothing else — no renderer ever touches
 a subprocess or an HTTP client directly.
 """
@@ -35,6 +35,8 @@ class EngineKind(StrEnum):
     MLX = "mlx"
     VLLM = "vllm"
     LLAMA_SERVER = "llama-server"
+    SGLANG = "sglang"
+    APHRODITE = "aphrodite"
     UNKNOWN = "unknown"
 
 
@@ -300,6 +302,25 @@ class EngineSnapshot(Frozen):
     @property
     def resident_bytes(self) -> int:
         return sum(m.size_bytes or 0 for m in self.loaded)
+
+
+# --------------------------------------------------------------------------- #
+# Benchmarking & Telemetry
+# --------------------------------------------------------------------------- #
+
+
+class BenchmarkResult(Frozen):
+    """Result of an inference latency / throughput benchmark run."""
+
+    model: str
+    engine: EngineKind = EngineKind.UNKNOWN
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_duration_s: float = 0.0
+    ttft_ms: float | None = None
+    tokens_per_second: float = 0.0
+    error: str | None = None
+    success: bool = True
 
 
 # --------------------------------------------------------------------------- #
