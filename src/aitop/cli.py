@@ -298,6 +298,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="runtime to pull into (default: ollama)",
     )
 
+    srv = subparsers.add_parser(
+        "service",
+        help="manage aitop serve as a background daemon (launchd/systemd)",
+    )
+    _add_common(srv)
+    srv_sub = srv.add_subparsers(dest="service_command", required=True)
+    srv_install = srv_sub.add_parser("install", help="install and start background service")
+    srv_install.add_argument("--host", default="0.0.0.0", help="host to bind (default: 0.0.0.0)")
+    srv_install.add_argument("--port", type=int, default=9090, help="port to bind (default: 9090)")
+    srv_sub.add_parser("status", help="check status of background service")
+    srv_sub.add_parser("uninstall", help="stop and uninstall background service")
+
+    cluster = subparsers.add_parser(
+        "cluster",
+        help="show aggregated multi-node fleet cluster telemetry",
+    )
+    _add_common(cluster)
+    cluster.add_argument("--json", action="store_true", help="emit cluster snapshot as JSON")
+
     delete = subparsers.add_parser("delete", help="remove a model from disk")
     _add_common(delete)
     delete.add_argument("engine", help="runtime kind (currently: ollama)")
@@ -399,6 +418,10 @@ def main(argv: list[str] | None = None) -> int:
                 return _run_config(args, console)
             case "models":
                 return asyncio.run(_run_models(args, config, console))
+            case "service":
+                return _run_service(args, console)
+            case "cluster":
+                return asyncio.run(_run_cluster(args, config, console))
             case _:
                 return asyncio.run(_run_dashboard(args, config, console))
     except KeyboardInterrupt:
@@ -1086,3 +1109,67 @@ def _configure_logging(debug: bool) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
+
+
+def _run_service(args: argparse.Namespace, console: Console) -> int:
+    from aitop.service import install_service, status_service, uninstall_service
+
+    cmd = args.service_command
+    if cmd == "install":
+        console.print(f"[cyan]installing background service ({args.host}:{args.port})…[/]")
+        ok, msg = install_service(host=args.host, port=args.port)
+        console.print(f"[{'green' if ok else 'yellow'}]{msg}[/]")
+        return 0 if ok else 1
+    elif cmd == "status":
+        status = status_service()
+        state_str = (
+            "[bold green]Active[/]"
+            if status.active
+            else ("[yellow]Inactive[/]" if status.installed else "[dim]Not installed[/]")
+        )
+        console.print(f"Platform:  {status.platform}")
+        console.print(f"Status:    {state_str}")
+        if status.pid:
+            console.print(f"PID:       {status.pid}")
+        console.print(f"Detail:    {status.detail}")
+        if status.unit_path:
+            console.print(f"Unit path: {status.unit_path}")
+        return 0 if status.installed else 1
+    elif cmd == "uninstall":
+        console.print("[cyan]uninstalling background service…[/]")
+        ok, msg = uninstall_service()
+        console.print(f"[{'green' if ok else 'yellow'}]{msg}[/]")
+        return 0 if ok else 1
+    return 1
+
+
+async def _run_cluster(args: argparse.Namespace, config: Config, console: Console) -> int:
+    collector = SnapshotCollector(config, allow_privileged=not args.no_privileged)
+    try:
+        cluster = await collector.collect_cluster()
+        if args.json:
+            import json
+
+            print(json.dumps(cluster.model_dump(mode="json"), indent=2))
+            return 0
+
+        from aitop.utils.fmt import bytes_human
+
+        table = Table(box=None, pad_edge=False, padding=(0, 2))
+        table.add_column("METRIC", style="bold bright_cyan")
+        table.add_column("VALUE")
+        table.add_row("Nodes", f"{cluster.online_nodes} online / {cluster.total_nodes} total")
+        table.add_row("Total GPUs", str(cluster.total_gpus))
+        table.add_row(
+            "Cluster VRAM",
+            f"{bytes_human(cluster.used_vram_bytes)} / {bytes_human(cluster.total_vram_bytes)}"
+            if cluster.total_vram_bytes > 0
+            else "—",
+        )
+        table.add_row("Online Engines", str(cluster.online_engines))
+        table.add_row("Resident Models", str(cluster.total_loaded_models))
+        table.add_row("Cluster Throughput", f"{cluster.cluster_tokens_per_second:.1f} tok/s")
+        console.print(table)
+        return 0
+    finally:
+        await collector.aclose()

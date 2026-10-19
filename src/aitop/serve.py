@@ -45,6 +45,7 @@ _ENDPOINTS = [
     "/healthz",
     "/api/snapshot",
     "/api/fleet",
+    "/api/cluster",
     "/api/stream",
     "/api/ws",
     "/metrics",
@@ -279,6 +280,14 @@ class SnapshotServer:
                     writer,
                     200,
                     payload,
+                    content_type="application/json",
+                )
+            elif path == "/api/cluster":
+                cluster = await self.collector.collect_cluster()
+                await self._write_raw(
+                    writer,
+                    200,
+                    cluster.model_dump_json().encode(),
                     content_type="application/json",
                 )
             elif path == "/api/stream":

@@ -41,6 +41,12 @@ class Topic(StrEnum):
 
     ERROR = "error"
 
+    ALERT = "alert"
+    """Telemetry or lifecycle alert event."""
+
+    CLUSTER = "cluster"
+    """Aggregated multi-node ClusterSnapshot."""
+
 
 @dataclass(frozen=True, slots=True)
 class Event:
