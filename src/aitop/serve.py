@@ -6,11 +6,15 @@
   GET  /ui               -> live HTML dashboard (with control actions)
   GET  /healthz          -> {"ok": true, "version": "..."}
   GET  /api/snapshot     -> SystemSnapshot JSON
+  GET  /api/fleet        -> list of SystemSnapshot JSONs
+  GET  /api/cluster      -> aggregated ClusterSnapshot JSON
+  GET  /api/federation   -> active peer connections and cluster link topology
   GET  /api/stream       -> text/event-stream of snapshots
-  GET  /api/ws           -> WebSocket snapshot stream
+  GET  /api/ws           -> WebSocket snapshot and event stream
   GET  /metrics          -> Prometheus text exposition
   POST /api/engines/{kind}/start|stop|restart
   POST /api/models/load|unload|delete
+  POST /api/federation/peers
 
 Implemented with the stdlib so the runtime dependency set stays small.
 """
@@ -27,15 +31,20 @@ import struct
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 
+from aitop.bus import Topic
 from aitop.collector import SnapshotCollector
 from aitop.config import Config
-from aitop.models import EngineKind, SystemSnapshot
+from aitop.federation import FederationManager
+from aitop.models import AlertEvent, ClusterSnapshot, EngineKind, SystemSnapshot
 from aitop.version import __version__
+
+if TYPE_CHECKING:
+    from aitop.bus import EventBus
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +55,7 @@ _ENDPOINTS = [
     "/api/snapshot",
     "/api/fleet",
     "/api/cluster",
+    "/api/federation",
     "/api/stream",
     "/api/ws",
     "/metrics",
@@ -56,9 +66,10 @@ _ENDPOINTS = [
     "/api/models/unload",
     "/api/models/delete",
     "/api/models/bench",
+    "/api/federation/peers",
 ]
 _PUBLIC_GET = frozenset({"/healthz", "/ui"})
-_MUTATING_PREFIXES = ("/api/engines/", "/api/models/")
+_MUTATING_PREFIXES = ("/api/engines/", "/api/models/", "/api/federation/peers")
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +133,7 @@ class SnapshotServer:
         interval: float | None = None,
         token: str | None = None,
         auth_all: bool = False,
+        federation: FederationManager | None = None,
     ) -> None:
         self.collector = collector
         self.host = host
@@ -132,6 +144,17 @@ class SnapshotServer:
         self._latest: SystemSnapshot | None = None
         self._lock = asyncio.Lock()
         self._server: asyncio.AbstractServer | None = None
+
+        if federation is not None:
+            self.federation: FederationManager | None = federation
+        else:
+            bus = getattr(collector, "bus", None)
+            node = getattr(collector, "node", "local")
+            cfg = getattr(collector, "config", None)
+            if cfg is not None:
+                self.federation = FederationManager.from_config(cfg, bus=bus, local_node=node)
+            else:
+                self.federation = FederationManager(bus=bus, local_node=node)
 
     async def refresh(self) -> SystemSnapshot:
         snapshot = await self.collector.collect()
@@ -155,8 +178,39 @@ class SnapshotServer:
         sockets = self._server.sockets or []
         bound = sockets[0].getsockname() if sockets else (self.host, self.port)
         log.info("aitop serve listening on http://%s:%s", bound[0], bound[1])
-        async with self._server:
-            await self._server.serve_forever()
+        if self.federation:
+            await self.federation.start()
+        try:
+            async with self._server:
+                await self._server.serve_forever()
+        finally:
+            if self.federation:
+                await self.federation.stop()
+
+    async def aclose(self) -> None:
+        """Gracefully shut down server, active connections, and federation."""
+        if self.federation:
+            await self.federation.stop()
+        if self._server:
+            self._server.close()
+            with contextlib.suppress(Exception):
+                await self._server.wait_closed()
+
+    def get_federation_status(self) -> dict[str, Any]:
+        """Return active peer connections and cluster link topology."""
+        if self.federation:
+            return self.federation.get_status()
+        local_node = getattr(self.collector, "node", "local")
+        return {
+            "local_node": local_node,
+            "active_connections": 0,
+            "total_peers": 0,
+            "peers": [],
+            "topology": {
+                "nodes": [local_node],
+                "links": [],
+            },
+        }
 
     def _authorized(
         self,
@@ -290,6 +344,14 @@ class SnapshotServer:
                     cluster.model_dump_json().encode(),
                     content_type="application/json",
                 )
+            elif path == "/api/federation":
+                fed_status = self.get_federation_status()
+                await self._write_raw(
+                    writer,
+                    200,
+                    json.dumps(fed_status).encode(),
+                    content_type="application/json",
+                )
             elif path == "/api/stream":
                 keep_open = True
                 await self._write_sse(writer)
@@ -331,6 +393,22 @@ class SnapshotServer:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 await self._write(writer, 400, {"error": "invalid json"})
                 return
+
+        # /api/federation/peers
+        if path == "/api/federation/peers":
+            name = str(payload.get("name") or "")
+            url = str(payload.get("url") or "")
+            token = payload.get("token")
+            timeout = float(payload.get("timeout") or 5.0)
+            if not name or not url:
+                await self._write(writer, 400, {"error": "name and url required"})
+                return
+            if self.federation:
+                peer = self.federation.add_peer(name, url, token=token, timeout=timeout)
+                await self._write(writer, 200, {"ok": True, "peer": peer.to_dict()})
+            else:
+                await self._write(writer, 500, {"error": "federation unavailable"})
+            return
 
         # /api/engines/{kind}/{action}
         if path.startswith("/api/engines/"):
@@ -466,7 +544,7 @@ class SnapshotServer:
         writer: asyncio.StreamWriter,
         headers: dict[str, str],
     ) -> bool:
-        """Upgrade and push snapshot JSON frames until the client disconnects."""
+        """Upgrade and push snapshot frames and bus events until client disconnects."""
         key = headers.get("sec-websocket-key")
         if not key or headers.get("upgrade", "").lower() != "websocket":
             await self._write(writer, 400, {"error": "websocket upgrade required"})
@@ -483,6 +561,10 @@ class SnapshotServer:
         writer.write(response.encode())
         await writer.drain()
 
+        bus: EventBus | None = getattr(self.collector, "bus", None)
+        sub = bus.subscribe(Topic.ALERT, Topic.CLUSTER) if bus else None
+        send_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=32)
+
         async def _drain_client() -> None:
             try:
                 while True:
@@ -498,27 +580,87 @@ class SnapshotServer:
                     payload = await reader.readexactly(length)
                     if masked:
                         payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-                    if opcode == 0x8:
+
+                    if opcode == 0x8:  # Close
                         return
-                    if opcode == 0x9:
-                        writer.write(_ws_frame(payload, opcode=0xA))
-                        await writer.drain()
+                    elif opcode == 0x9:  # Ping
+                        pong = _ws_frame(payload, opcode=0xA)
+                        with contextlib.suppress(asyncio.QueueFull):
+                            send_queue.put_nowait(pong)
+                    elif opcode == 0x1:  # Text frame from client (relay)
+                        try:
+                            msg = json.loads(payload.decode("utf-8", errors="replace"))
+                            if isinstance(msg, dict):
+                                topic_str = msg.get("topic")
+                                raw_payload = msg.get("payload")
+                                source = msg.get("source", "ws-peer")
+                                b = getattr(self.collector, "bus", None)
+                                if b and topic_str:
+                                    if topic_str in (Topic.ALERT.value, "alert"):
+                                        alert = (
+                                            AlertEvent.model_validate(raw_payload)
+                                            if isinstance(raw_payload, dict)
+                                            else raw_payload
+                                        )
+                                        b.publish(Topic.ALERT, alert, source=source)
+                                    elif topic_str in (Topic.CLUSTER.value, "cluster"):
+                                        cluster = (
+                                            ClusterSnapshot.model_validate(raw_payload)
+                                            if isinstance(raw_payload, dict)
+                                            else raw_payload
+                                        )
+                                        b.publish(Topic.CLUSTER, cluster, source=source)
+                        except Exception as exc:
+                            log.debug("error handling client ws frame: %s", exc)
             except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
                 return
 
-        reader_task = asyncio.create_task(_drain_client())
-        try:
+        async def _produce_snapshots() -> None:
             async for snapshot in self.stream():
-                if reader_task.done():
-                    break
-                writer.write(_ws_frame(snapshot.model_dump_json().encode()))
+                frame = _ws_frame(snapshot.model_dump_json().encode())
+                await send_queue.put(frame)
+
+        async def _produce_bus_events() -> None:
+            if not sub:
+                return
+            async for event in sub:
+                payload_json = (
+                    event.payload.model_dump(mode="json")
+                    if hasattr(event.payload, "model_dump")
+                    else event.payload
+                )
+                msg = json.dumps(
+                    {
+                        "topic": event.topic.value,
+                        "payload": payload_json,
+                        "source": event.source,
+                    }
+                )
+                frame = _ws_frame(msg.encode())
+                await send_queue.put(frame)
+
+        async def _send_loop() -> None:
+            while True:
+                frame = await send_queue.get()
+                writer.write(frame)
                 await writer.drain()
+
+        reader_task = asyncio.create_task(_drain_client())
+        snap_task = asyncio.create_task(_produce_snapshots())
+        bus_task = asyncio.create_task(_produce_bus_events())
+        send_task = asyncio.create_task(_send_loop())
+
+        try:
+            await reader_task
         except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
             pass
         finally:
-            reader_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reader_task
+            if sub:
+                sub.close()
+            for t in (reader_task, snap_task, bus_task, send_task):
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()

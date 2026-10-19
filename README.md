@@ -18,10 +18,10 @@ inference telemetry, lifecycle control, and a fleet gateway for remote nodes.
    █▀█ █  █  █▄█ █▀▀
 ```
 
-> **Status: v1.0.0 Production Release.** Complete AI runtime control plane — multi-node cluster aggregation,
-> Tailscale fleet auto-discovery, native background daemon management (launchd/systemd), alerting engine (webhooks & bells),
-> live inference benchmarking (TTFT & tok/s), 7 engine adapters (Ollama, LM Studio, vLLM, llama-server, MLX, SGLang, Aphrodite),
-> full hardware telemetry (Apple Silicon, NVIDIA, AMD ROCm, Intel Arc/Xe), Textual TUI, web dashboard, and Prometheus cluster export.
+> **Status: v1.1.0 Feature Expansion.** Complete AI runtime control plane — KV Cache & VRAM Fit Advisor,
+> statistical request latency tracing (P50/P90/P99), TUI Command Palette (`Ctrl+P`), peer-to-peer WebSocket fleet federation,
+> multi-node cluster aggregation, Tailscale fleet auto-discovery, background daemon management (launchd/systemd), alerting engine,
+> live inference benchmarking (TTFT & tok/s), 7 engine adapters, and Prometheus cluster export.
 
 ---
 
@@ -146,6 +146,7 @@ aitop update           # upgrade in place
 | `u` | unload selected resident model |
 | `d` | delete catalog model from disk |
 | `p` | pull a model into the selected engine |
+| `ctrl+p` | open spotlight command palette |
 | `b` | run inference benchmark on selected model |
 | `a` | toggle offline engines |
 | `r` | force refresh |

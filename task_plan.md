@@ -1,64 +1,50 @@
-# Task Plan: aitop 1.0 Production Release
+# Task Plan: aitop 1.1 Major Refactor & Feature Expansion
 
 ## Goal
-Advance `aitop` from v0.3.0 to a complete, production-grade 1.0 release with cluster auto-discovery, cluster-wide metric aggregation, alerting engine, background daemon/service management, enhanced web & TUI experiences, expanded Prometheus/cluster telemetry, and full test suite verification.
+Execute a major v1.1 refactor and expansion using a coordinated team of specialized subagents:
+1. Modularized TUI with spotlight-style Command Palette (`Ctrl+P` / `F1`).
+2. Implemented **KV Cache & VRAM Fit Advisor** (`aitop.advisor`) to calculate context capacity and quantization fit before loading.
+3. Implemented **Inference Request Tracing & Latency Percentiles** (P50, P90, P95, P99) in `aitop.tracing`.
+4. Implemented **Fleet WebSocket Federation** (`aitop.federation`) for real-time peer-to-peer cluster synchronization.
+5. Added `GET /api/federation` and `POST /api/federation/peers` in `aitop.serve`.
+6. Verified full test suite (263 passed tests in 7.0s), linting, packaging, and open Pull Request for v1.1.
 
-## Current Phase
-Phase 7: Verification, Docs, Packaging & v1.0 Release
+## Agent Team Roles
+- **Lead Orchestrator (Antigravity Main):** Planning, integration, cross-module cohesion, CommandPaletteScreen, test harness, and release PR.
+- **Agent 1 (Advisor & Tracing Architect):** `aitop.advisor` (KV cache calculation, VRAM fit) and `aitop.tracing` (latency histogram & percentiles).
+- **Agent 2 (Fleet Federation Engineer):** Bi-directional WebSocket event bus federation across nodes in `src/aitop/federation.py` and `aitop.serve`.
 
 ## Phases
 
-### Phase 1: Architecture, Discovery & Plan Initialization
-- [x] Analyze codebase architecture and identify v1.0 seams
-- [x] Create persistent planning files (task_plan.md, findings.md, progress.md)
-- [x] Define cluster, alert, service, and UI models
+### Phase 1: Team Launch & Modular Planning
+- [x] Create branch `feat/v1.1-refactor-expansion`
+- [x] Update `task_plan.md` and define team responsibilities
+- [x] Launch specialized subagents with designated scopes
 - **Status:** complete
 
-### Phase 2: Cluster Auto-Discovery & Aggregation
-- [x] Design and implement `aitop.discovery` (Tailscale peer discovery + endpoint probing)
-- [x] Implement `ClusterSnapshot` with aggregate VRAM, GPUs, engines, and cluster tok/s
-- [x] Integrate cluster aggregation into `SnapshotCollector` and `SnapshotServer`
+### Phase 2: Core Algorithms (Advisor & Latency Tracing)
+- [x] Implement `aitop.advisor` (model weight + KV cache memory estimation per context window)
+- [x] Implement `aitop.tracing` (moving window latency tracker for TTFT and inter-token arrival, calculating p50/p90/p99)
+- [x] Add `ModelFitResult` and `LatencySummary` in `src/aitop/models.py`
+- [x] Add unit tests in `tests/test_advisor_tracing.py`
 - **Status:** complete
 
-### Phase 3: Alerting Engine
-- [x] Implement `aitop.alerts` with rules for high VRAM, engine down, high temp
-- [x] Implement dispatchers: Webhook (Slack/Discord/generic), Terminal Bell, EventBus
-- [x] Wire alerting into `SnapshotCollector` background cycle
+### Phase 3: TUI Refactoring & Command Palette
+- [x] Add `CommandPaletteScreen` in `src/aitop/views/tui_screens.py`
+- [x] Wire `Ctrl+P` spotlight command palette into `src/aitop/views/tui.py` for actions, models, navigation, and benchmarking
 - **Status:** complete
 
-### Phase 4: Service / Daemon Management
-- [x] Implement `aitop.service` for macOS `launchd` and Linux `systemd` user service
-- [x] Add CLI commands `aitop service install|status|uninstall`
+### Phase 4: Fleet WebSocket Federation
+- [x] Implement `src/aitop/federation.py` with `FederationManager`, `PeerConnection`, `WebSocketClient`
+- [x] Support automatic reconnect loop with exponential backoff
+- [x] Relay `Topic.ALERT` and `Topic.CLUSTER` events across federated nodes
+- [x] Add `/api/federation` and `/api/federation/peers` to `aitop.serve`
+- [x] Add integration tests in `tests/test_federation.py`
 - **Status:** complete
 
-### Phase 5: TUI Polish & Web Dashboard v1.0
-- [x] Add cluster summary widget to TUI Fleet pane & detail strip
-- [x] Add color themes in config & TUI
-- [x] Enhance web UI with cluster dashboard link and interactive benchmark trigger
-- **Status:** complete
-
-### Phase 6: Expanded Metrics & Telemetry
-- [x] Add cluster-level Prometheus metrics to `aitop.prometheus` (`render_cluster_prometheus`)
-- [x] Add `/api/cluster` to `aitop serve`
-- **Status:** complete
-
-### Phase 7: Verification, Docs, Packaging & v1.0 Release
-- [x] Write comprehensive unit tests for all new modules (`tests/test_v100_release.py`)
-- [x] Run full test suite (237 passed), linting (`ruff`), and type verification
-- [x] Update `README.md`, bump version to `1.0.0` in `version.py`
+### Phase 5: Verification & v1.1 Release
+- [x] Full regression testing (`uv run pytest -q`: 263 passed in 7.0s)
+- [x] Linting & formatting (`uv run ruff check` & `uv run ruff format`)
+- [x] Bump version to 1.1.0 in `src/aitop/version.py`, build sdist & wheel
 - [ ] Commit, push, and open/link GitHub Pull Request
 - **Status:** in_progress
-
-## Decisions Made
-| Decision | Rationale |
-|----------|-----------|
-| Zero external network in tests | Enforced by project conftest and respx mock fixtures |
-| Modular stdlib-first service manager | Generates standard launchd plist and systemd units without external dependencies |
-| Tailscale-first cluster discovery | Automatic discovery of tailnet peers running aitop serve on port 9090 |
-| Pydantic immutable models for ClusterSnapshot and AlertEvent | Thread-safe, serialized across EventBus, JSON endpoints, and TUI |
-
-## Errors Encountered
-| Error | Attempt | Resolution |
-|-------|---------|------------|
-| GPUSnapshot vendor name collision | 1 | Imported `Vendor` instead of `GPUVendor` |
-| GPUSnapshot attribute naming | 1 | Used `vram_total_bytes` and `vram_used_bytes` instead of `memory_*` |
